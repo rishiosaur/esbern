@@ -82,6 +82,7 @@ replacement device only after verifying the connection.
 | `esbern init`      | Save SSH connection details                        |
 | `esbern ping`      | Verify the SSH connection                          |
 | `esbern get …`     | Download a book into the current sync folder       |
+| `esbern serve`     | Serve the cover grid and book/sync HTTP API         |
 | `esbern normalize` | Preview/apply UUID-preserving library cleanup       |
 | `esbern dedup`     | Move byte-identical local duplicates to recovery   |
 | `esbern sync`      | Two-way sync (push + pull) for the current folder  |
@@ -94,6 +95,53 @@ replacement device only after verifying the connection.
 
 `esbern sync --dry-run` shows what the push side *would* upload without
 connecting.
+
+## Run the library server
+
+Start the UV-managed Python server from the library root. It listens on every
+interface so it is reachable through Tailscale by default:
+
+```sh
+cd ~/reading/Books
+uv run esbern serve
+# http://server:3000       image-only cover grid
+# http://server:3000/docs  generated API reference
+```
+
+Use `--host 127.0.0.1` to keep it local or `--port 8080` to choose another
+port. The root page recursively finds every PDF and EPUB in the library and
+renders one cover image per file. EPUB cover art and first-page PDF images are
+used when available; otherwise Esbern generates a deterministic title cover.
+
+The JSON API exposes the same downloader and two-way sync engine as the CLI.
+A successful single or bulk download is installed locally first, then the
+entire library is synced with the configured reMarkable exactly once:
+
+```sh
+# Catalog
+curl http://server:3000/api/books
+
+# One book
+curl -X POST http://server:3000/api/books \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"The Left Hand of Darkness Ursula Le Guin"}'
+
+# Raw UTF-8 text: one query per non-empty line
+curl -X POST 'http://server:3000/api/books/bulk?jobs=4' \
+  -H 'Content-Type: text/plain' \
+  --data-binary @books.txt
+
+# Reconcile all nested folders with the reMarkable
+curl -X POST http://server:3000/api/sync \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
+Mutation routes are public unless `ESBERN_API_TOKEN` is set. When it is set,
+send `Authorization: Bearer <token>` with download and sync requests. Set
+`ESBERN_CORS_ORIGIN` to restrict cross-origin browser clients; it defaults to
+`*`. Put the server behind a reverse proxy if it is exposed beyond a trusted
+Tailscale network.
 
 Uploads use four parallel SSH workers by default. Each worker independently
 classifies and transfers a book, while completed books are checkpointed one at
@@ -192,13 +240,52 @@ esbern normalize
 esbern normalize --apply
 ```
 
-`--apply` preserves each reMarkable UUID and annotation directory. It updates
-the EPUB payload and visible title on the existing device document, renames the
-local file, moves the sync-state and tag keys, and checkpoints after each book.
+If a fully resolved run is interrupted—or Google Books is temporarily
+unavailable or quota-limited—reuse its recovery directory without performing
+new catalog requests:
+
+```sh
+esbern normalize --resume-plan .esbern/metadata-backups/<timestamp> --apply
+```
+
+If the local batch is already complete and only device checkpoints remain,
+resume just those entries with `esbern normalize --resume-pending --apply`.
+Pending EPUB payloads are uploaded to a temporary device path and atomically
+renamed into place, so a slow or interrupted transfer cannot truncate the
+existing document payload.
+
+`--apply` preserves each reMarkable UUID and annotation directory. Before the
+first device write, it backs up every source, prepares all EPUB metadata in
+parallel, and commits every real local payload and canonical filename as one
+rollback-safe batch (eight local workers by default). It also moves the
+sync-state, tag, and metadata-override keys to those canonical paths. Use
+`--workers N` or `ESBERN_METADATA_WORKERS` to choose 1-32 preparation workers.
+Only after the complete local library is canonical does it update the EPUB
+payload and visible title on each existing device document, checkpointing each
+preserved UUID individually. If the device phase is interrupted, pending state
+entries remain detectable as local changes so a later normalization or normal
+sync can safely finish them.
 Original state, device metadata, the plan, and (by default) original local
 payloads are kept under `.esbern/metadata-backups/<timestamp>/`. Use
 `--allow-unmatched` only to apply the unambiguous subset, and
 `--no-backup-files` only when you intentionally do not want payload backups.
+
+For scans, articles, duplicate editions, or a Google catalog correction, add
+the tracked relative filename to `.esbern/metadata-overrides.json`. An override
+must contain `title`, an `authors` list, and `published_date`; it can also use
+any `BookMetadata` field such as `google_id`, `publisher`, `language`,
+`categories`, `isbn_10`, or `isbn_13`. Overrides are validated before any
+device or local write:
+
+```json
+{
+  "Unhelpful scan name.pdf": {
+    "title": "A Useful Title",
+    "authors": ["Ada Lovelace"],
+    "published_date": "1843"
+  }
+}
+```
 
 ## Remove duplicate downloads
 

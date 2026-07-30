@@ -16,6 +16,7 @@ from esbern.book_metadata import (
     epub_isbns,
     lookup_google_books,
     normalize_download,
+    read_epub_metadata,
 )
 
 CONTAINER = """<?xml version="1.0" encoding="UTF-8"?>
@@ -106,6 +107,7 @@ def test_normalizes_epub_from_exact_embedded_isbn(get, tmp_path) -> None:
     )
     assert metadata.publisher == "Example Press"
     assert epub_isbns(path) == ("9781234567897", "123456789X")
+    assert read_epub_metadata(path) == metadata
     assert get.call_args.kwargs["params"]["q"] == "isbn:9781234567897"
     assert get.call_args.kwargs["params"]["key"] == "secret-key"
 
@@ -135,6 +137,37 @@ def test_query_fallback_rejects_marketing_filename_fluff(get) -> None:
     )
 
     assert result.title == "Pachinko"
+
+
+def test_canonical_filename_drops_unsafe_punctuation_without_underscores() -> None:
+    book = BookMetadata(
+        google_id="id",
+        title='What Is This?: A / B * "Test"',
+        authors=("Ada Lovelace",),
+        published_date="2024",
+    )
+
+    assert canonical_filename(book, ".EPUB") == (
+        "Ada Lovelace - What Is This — A - B 'Test' (2024).epub"
+    )
+
+
+@patch("esbern.book_metadata.requests.get")
+def test_catalog_title_drops_generic_edition_and_marketing_fluff(get) -> None:
+    get.return_value = FakeResponse(
+        {
+            "items": [
+                _volume(
+                    title="The Dream Hotel",
+                    subtitle="A Read with Jenna Pick: A Novel",
+                )
+            ]
+        }
+    )
+
+    result = lookup_google_books("The Dream Hotel", api_key="secret")
+
+    assert result.title == "The Dream Hotel"
 
 
 @patch("esbern.book_metadata.requests.get")
@@ -194,6 +227,21 @@ def test_author_match_beats_derivative_title_that_mentions_the_authors(get) -> N
     )
 
     assert result.google_id == "google-volume"
+
+
+@patch("esbern.book_metadata.requests.get")
+def test_expected_filename_hints_reject_a_different_author_and_title(get) -> None:
+    get.return_value = FakeResponse(
+        {"items": [_volume(title="Towards a History of Cantor's Problem")]}
+    )
+
+    with pytest.raises(BookMetadataError, match="author/title-verified"):
+        lookup_google_books(
+            "White Light Rudy Rucker",
+            api_key="secret",
+            expected_title="White Light or What is Cantor's Continuum Problem?",
+            expected_authors=("Rudy Rucker",),
+        )
 
 
 @patch("esbern.book_metadata.requests.get")

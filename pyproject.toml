@@ -17,6 +17,8 @@ dependencies = [
     "pypdf>=4.0",
     "requests>=2.31",
     "rich>=13.7",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.0",
 ]
 
 [project.scripts]

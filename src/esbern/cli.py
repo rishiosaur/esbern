@@ -36,7 +36,9 @@ from esbern.downloader import (
 )
 from esbern.library_metadata import (
     apply_library_metadata,
+    load_library_metadata_plan,
     plan_library_metadata,
+    resume_pending_library_metadata,
 )
 from esbern.remarkable import connected
 from esbern.state import State
@@ -44,6 +46,7 @@ from esbern.sync import SyncEvent, _safe_name
 from esbern.sync import pull as run_pull
 from esbern.sync import sync as run_sync
 from esbern.tags import TAGS_PATH, TagStore
+from esbern.web_server import serve_web
 
 
 @click.group(help="Two-way sync between a local folder and a reMarkable Paper Pro.")
@@ -199,6 +202,30 @@ def ping() -> None:
     with connected(cfg) as rm:
         rc, out, _ = rm.exec("cat /etc/version 2>/dev/null; uname -a")
         click.echo(out.strip() if rc == 0 else "connected")
+
+
+@main.command(help="Serve the library and HTTP API.")
+@click.option(
+    "--path",
+    default=".",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Library root containing PDF/EPUB folders.",
+)
+@click.option(
+    "--host",
+    "hostname",
+    default="0.0.0.0",
+    show_default=True,
+    help="Address for the web server to listen on.",
+)
+@click.option(
+    "--port",
+    default=3000,
+    show_default=True,
+    type=click.IntRange(1, 65535),
+)
+def serve(path: Path, hostname: str, port: int) -> None:
+    serve_web(path, hostname=hostname, port=port)
 
 
 @main.command(help="Two-way sync between the current directory and the reMarkable.")
@@ -548,6 +575,16 @@ def get_book(
     help="Google Books API key (prefer the GOOGLE_BOOKS_API_KEY environment variable).",
 )
 @click.option(
+    "--resume-plan",
+    type=click.Path(exists=True, path_type=Path),
+    help="Reuse a complete prior metadata backup/plan without new Google requests.",
+)
+@click.option(
+    "--resume-pending",
+    is_flag=True,
+    help="Finish device updates after the complete local batch was committed.",
+)
+@click.option(
     "--apply",
     "apply_changes",
     is_flag=True,
@@ -564,16 +601,24 @@ def get_book(
     show_default=True,
     help="Keep recoverable copies of original local payloads.",
 )
+@click.option(
+    "--workers",
+    type=click.IntRange(1, 32),
+    default=8,
+    show_default=True,
+    envvar="ESBERN_METADATA_WORKERS",
+    help="Parallel workers for local backup and EPUB metadata preparation.",
+)
 def normalize_library(
     path: Path,
     google_books_key: str | None,
+    resume_plan: Path | None,
+    resume_pending: bool,
     apply_changes: bool,
     allow_unmatched: bool,
     backup_files: bool,
+    workers: int,
 ) -> None:
-    google_books_key = google_books_api_key(google_books_key)
-    if not google_books_key:
-        raise click.UsageError("Set GOOGLE_BOOKS_API_KEY or pass --google-books-key.")
     # Preserve the final path component so the normalization preflight can
     # reject a library root that is itself a symlink.
     root = path.expanduser().absolute()
@@ -585,19 +630,67 @@ def normalize_library(
     console = Console()
 
     def report(action: str, detail: str) -> None:
-        style = "green" if action in {"planned", "updated"} else "cyan"
+        style = "green" if action in {"planned", "resumed", "updated"} else "cyan"
         console.print(f"{action.capitalize()}: {detail}", style=style, markup=False)
 
-    console.print(
-        f"Resolving Google Books metadata for {len(state.files)} tracked books…",
-        style="bold cyan",
-        markup=False,
-    )
-    plans, failures = plan_library_metadata(
-        root,
-        api_key=google_books_key,
-        reporter=report,
-    )
+    if resume_pending:
+        if resume_plan is not None:
+            raise click.UsageError(
+                "Pass either --resume-pending or --resume-plan, not both."
+            )
+        if not apply_changes:
+            raise click.UsageError("--resume-pending requires --apply.")
+        cfg = config.load()
+        console.print(
+            "Validating and resuming pending atomic device updates…",
+            style="bold cyan",
+            markup=False,
+        )
+        try:
+            with connected(cfg) as rm:
+                result = resume_pending_library_metadata(
+                    rm, root, reporter=report
+                )
+                if cfg.restart_xochitl and result.files_updated:
+                    rm.restart_xochitl()
+        except (BookMetadataError, OSError, ValueError) as error:
+            raise click.ClickException(str(error) or type(error).__name__) from error
+        console.print(
+            f"Finished {result.files_updated} pending device updates.",
+            style="green",
+            markup=False,
+        )
+        return
+
+    try:
+        if resume_plan is not None:
+            console.print(
+                f"Loading saved metadata for {len(state.files)} tracked books…",
+                style="bold cyan",
+                markup=False,
+            )
+            plans = load_library_metadata_plan(
+                root, resume_plan, reporter=report
+            )
+            failures = []
+        else:
+            google_books_key = google_books_api_key(google_books_key)
+            if not google_books_key:
+                raise click.UsageError(
+                    "Set GOOGLE_BOOKS_API_KEY or pass --google-books-key."
+                )
+            console.print(
+                f"Resolving Google Books metadata for {len(state.files)} tracked books…",
+                style="bold cyan",
+                markup=False,
+            )
+            plans, failures = plan_library_metadata(
+                root,
+                api_key=google_books_key,
+                reporter=report,
+            )
+    except BookMetadataError as error:
+        raise click.ClickException(str(error)) from error
     if failures:
         console.print(
             f"\n{len(failures)} file(s) need manual review:",
@@ -632,7 +725,7 @@ def normalize_library(
 
     cfg = config.load()
     console.print(
-        "Validating UUIDs and applying metadata to local files and reMarkable…",
+        "Validating UUIDs, normalizing every local file, then updating reMarkable…",
         style="bold cyan",
         markup=False,
     )
@@ -643,6 +736,7 @@ def normalize_library(
                 root,
                 plans,
                 backup_files=backup_files,
+                workers=workers,
                 reporter=report,
             )
             if cfg.restart_xochitl:

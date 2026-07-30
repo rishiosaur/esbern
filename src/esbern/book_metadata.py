@@ -30,14 +30,21 @@ _ISBN = re.compile(
     r"(?<!\d)(?:97[89][\d\s-]{10,16}|[\dXx][\dXx\s-]{8,14})(?!\d)"
 )
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-_FILENAME_BAD = re.compile(r'[<>"/\\|?*]')
+_FILENAME_SEPARATORS = str.maketrans({'"': "'", "/": "-", "\\": "-", "|": "-"})
+_FILENAME_DROP = re.compile(r"[<>?*]")
 _MARKETING_SUFFIX = re.compile(
     r"\s*\((?:national book award finalist|movie tie[- ]in|"
-    r"motion picture tie[- ]in|media tie[- ]in)\)\s*$",
+    r"motion picture tie[- ]in|media tie[- ]in|the sunday times bestseller|"
+    r"sunday times bestseller|read with jenna pick|mti)\)\s*$",
     re.IGNORECASE,
 )
 _MARKETING_WORDS = re.compile(
     r"\b(?:award|bestseller|shortlist|tie[- ]in)\b", re.IGNORECASE
+)
+_GENERIC_SUBTITLE = re.compile(
+    r"^(?:an? (?:novel|story)|stories|\d+(?:st|nd|rd|th) anniversary edition|"
+    r"(?:a )?read with .+|the sequel to .+|winner of .+)$",
+    re.IGNORECASE,
 )
 _TITLE_STOPWORDS = {
     "a",
@@ -180,6 +187,61 @@ def epub_search_hints(path: Path) -> tuple[str, tuple[str, ...]]:
     return title, authors
 
 
+def read_epub_metadata(path: Path) -> BookMetadata:
+    """Read the descriptive metadata Esbern stores in an EPUB package."""
+    try:
+        with ZipFile(path) as archive:
+            package = ET.fromstring(archive.read(_opf_rootfile(archive)))
+    except (OSError, KeyError, ET.ParseError, BookMetadataError) as error:
+        raise BookMetadataError(f"could not read EPUB metadata: {error}") from error
+
+    def values(local_name: str) -> tuple[str, ...]:
+        return tuple(
+            value
+            for value in (
+                _clean_text(element.text)
+                for element in package.findall(f".//{{{_DC}}}{local_name}")
+            )
+            if value
+        )
+
+    titles = values("title")
+    authors = values("creator")
+    dates = values("date")
+    identifiers = values("identifier")
+    isbn_10 = tuple(
+        isbn
+        for value in identifiers
+        if (isbn := _normalized_isbn(value)) and len(isbn) == 10
+    )
+    isbn_13 = tuple(
+        isbn
+        for value in identifiers
+        if (isbn := _normalized_isbn(value)) and len(isbn) == 13
+    )
+    google_id = next(
+        (value.removeprefix("google:") for value in identifiers if value.startswith("google:")),
+        "",
+    )
+    metadata = BookMetadata(
+        google_id=google_id,
+        title=titles[0] if titles else "",
+        authors=authors,
+        published_date=dates[0] if dates else "",
+        publisher=(values("publisher") or ("",))[0],
+        description=(values("description") or ("",))[0],
+        language=(values("language") or ("",))[0],
+        categories=values("subject"),
+        isbn_10=tuple(dict.fromkeys(isbn_10)),
+        isbn_13=tuple(dict.fromkeys(isbn_13)),
+    )
+    if not metadata.title or not metadata.authors or not metadata.year:
+        raise BookMetadataError(
+            f"EPUB metadata is missing a title, author, or year: {path}"
+        )
+    return metadata
+
+
 def _parse_volume(item: object) -> BookMetadata | None:
     if not isinstance(item, dict):
         return None
@@ -192,6 +254,18 @@ def _parse_volume(item: object) -> BookMetadata | None:
         subtitle = subtitle.rsplit(":", 1)[1].strip()
     if subtitle and subtitle.casefold() not in title.casefold():
         title = f"{title}: {subtitle}"
+    title = _MARKETING_SUFFIX.sub("", title)
+    title_parts = title.split(":")
+    kept_parts = [title_parts[0]]
+    for part in title_parts[1:]:
+        stripped = re.sub(
+            r"\s+(?:an? novel|a story)\s*$", "", part.strip(), flags=re.IGNORECASE
+        )
+        if _GENERIC_SUBTITLE.match(stripped):
+            break
+        if stripped:
+            kept_parts.append(stripped)
+    title = ": ".join(kept_parts)
     raw_authors = info.get("authors")
     authors = tuple(
         author
@@ -365,7 +439,18 @@ def _expected_metadata_match(
         candidate_terms = _terms(metadata.title) - _TITLE_STOPWORDS
         if expected_terms:
             coverage = len(expected_terms & candidate_terms) / len(expected_terms)
-            if coverage < 0.6:
+            expected_primary = _terms(
+                expected_title.split(":", 1)[0].split(" (", 1)[0]
+            ) - _TITLE_STOPWORDS
+            candidate_primary = _terms(
+                metadata.title.split(":", 1)[0].split(" (", 1)[0]
+            ) - _TITLE_STOPWORDS
+            primary_coverage = (
+                len(expected_primary & candidate_primary) / len(expected_primary)
+                if expected_primary
+                else 0.0
+            )
+            if coverage < 0.6 and primary_coverage < 0.8:
                 return False
     if expected_authors:
         expected_terms = _terms(" ".join(expected_authors))
@@ -569,8 +654,8 @@ def write_epub_metadata(path: Path, book: BookMetadata) -> None:
 
 
 def _filename_component(value: str) -> str:
-    value = _clean_text(value).replace(":", " —")
-    value = _FILENAME_BAD.sub("_", value).strip().rstrip(".")
+    value = _clean_text(value).replace(":", " —").translate(_FILENAME_SEPARATORS)
+    value = " ".join(_FILENAME_DROP.sub("", value).split()).strip().rstrip(".")
     return value or "Unknown"
 
 
