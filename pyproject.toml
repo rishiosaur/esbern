@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "esbern"
+version = "0.1.0"
+description = "Sync a local folder to a reMarkable Paper Pro"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Rishi Kothari" }]
+dependencies = [
+    "click>=8.1",
+    "paramiko>=3.4",
+    "tomli>=2.0; python_version < '3.11'",
+    "anthropic>=0.40",
+    "pypdf>=4.0",
+    "requests>=2.31",
+    "rich>=13.7",
+]
+
+[project.scripts]
+esbern = "esbern.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/esbern"]
