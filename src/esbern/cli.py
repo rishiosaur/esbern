@@ -44,12 +44,13 @@ from esbern.remarkable import connected
 from esbern.state import State
 from esbern.sync import SyncEvent, _safe_name
 from esbern.sync import pull as run_pull
+from esbern.sync import push as run_push
 from esbern.sync import sync as run_sync
 from esbern.tags import TAGS_PATH, TagStore
 from esbern.web_server import serve_web
 
 
-@click.group(help="Two-way sync between a local folder and a reMarkable Paper Pro.")
+@click.group(help="Manage a local book library and its reMarkable copy.")
 @click.version_option(__version__)
 def main() -> None:
     pass
@@ -295,6 +296,66 @@ def sync(path: str, workers: int, dry_run: bool) -> None:
     )
 
 
+def _push_paths(
+    root: Path,
+    paths: list[Path] | None,
+    *,
+    workers: int,
+    console: Console,
+) -> None:
+    cfg = config.load()
+    display = _VerboseSyncDisplay(console)
+    selected = (
+        [path.resolve().relative_to(root) for path in paths]
+        if paths is not None
+        else None
+    )
+    console.print(
+        f"Connecting to {cfg.user}@{cfg.host} to push {root} → reMarkable/{root.name}…",
+        style="bold cyan",
+        markup=False,
+    )
+    with (
+        console.status("Opening SSH and SFTP sessions…", spinner="dots") as status,
+        connected(cfg) as rm,
+    ):
+        status.stop()
+        with display.transfer:
+            stats = run_push(
+                rm,
+                root,
+                restart=cfg.restart_xochitl,
+                reporter=display,
+                workers=workers,
+                paths=selected,
+            )
+            display.close()
+    console.print(
+        f"Push complete: {stats.files_uploaded} new, "
+        f"{stats.files_updated} updated, {stats.folders_created} folders.",
+        style="green",
+        markup=False,
+    )
+
+
+@main.command(help="Push local changes to reMarkable without pulling device books.")
+@click.option(
+    "--path",
+    default=".",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option(
+    "--workers",
+    default=4,
+    show_default=True,
+    type=click.IntRange(1, 8),
+    envvar="ESBERN_SYNC_WORKERS",
+    help="Parallel SSH workers for classification and uploads.",
+)
+def push(path: Path, workers: int) -> None:
+    _push_paths(path.resolve(), None, workers=workers, console=Console())
+
+
 @main.command(help="Pull new and changed files from the reMarkable into this folder.")
 @click.argument("remote_folder", required=False)
 @click.option("--path", default=".", type=click.Path(exists=True, file_okay=False))
@@ -340,7 +401,10 @@ def pull(remote_folder: str | None, path: str) -> None:
     )
 
 
-@main.command("get", help="Find and download a book into the local sync folder.")
+@main.command(
+    "get",
+    help="Download a book and push the new file to reMarkable by default.",
+)
 @click.argument("terms", nargs=-1)
 @click.option(
     "-b",
@@ -388,6 +452,20 @@ def pull(remote_folder: str | None, path: str) -> None:
     show_default=True,
     help="Enrich LibGen downloads and apply Author(s) - Title (year) filenames.",
 )
+@click.option(
+    "--push/--no-push",
+    "push_after",
+    default=True,
+    show_default=True,
+    help="Push downloaded books to reMarkable without running a pull.",
+)
+@click.option(
+    "--push-workers",
+    type=click.IntRange(1, 8),
+    default=4,
+    show_default=True,
+    envvar="ESBERN_SYNC_WORKERS",
+)
 def get_book(
     terms: tuple[str, ...],
     bulk: Path | None,
@@ -397,6 +475,8 @@ def get_book(
     source: str,
     google_books_key: str | None,
     metadata: bool,
+    push_after: bool,
+    push_workers: int,
 ) -> None:
     query = " ".join(terms).strip()
     if bulk and query:
@@ -434,6 +514,13 @@ def get_book(
             style="green",
             markup=False,
         )
+        if push_after:
+            _push_paths(
+                destination,
+                [result.path],
+                workers=push_workers,
+                console=console,
+            )
         return
 
     try:
@@ -555,6 +642,13 @@ def get_book(
         f"\nBulk complete: {len(succeeded)} downloaded, {len(failed)} failed, "
         f"{len(skipped)} skipped."
     )
+    if push_after and succeeded:
+        _push_paths(
+            destination,
+            succeeded,
+            workers=push_workers,
+            console=console,
+        )
     if failed:
         raise click.exceptions.Exit(1)
 
@@ -648,9 +742,7 @@ def normalize_library(
         )
         try:
             with connected(cfg) as rm:
-                result = resume_pending_library_metadata(
-                    rm, root, reporter=report
-                )
+                result = resume_pending_library_metadata(rm, root, reporter=report)
                 if cfg.restart_xochitl and result.files_updated:
                     rm.restart_xochitl()
         except (BookMetadataError, OSError, ValueError) as error:
@@ -669,9 +761,7 @@ def normalize_library(
                 style="bold cyan",
                 markup=False,
             )
-            plans = load_library_metadata_plan(
-                root, resume_plan, reporter=report
-            )
+            plans = load_library_metadata_plan(root, resume_plan, reporter=report)
             failures = []
         else:
             google_books_key = google_books_api_key(google_books_key)

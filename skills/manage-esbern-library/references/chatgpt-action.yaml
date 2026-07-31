@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Esbern Library
-  description: Search the owner's library, queue books for download, and synchronize with reMarkable. Before adding, resolve ISBN-13, search by ISBN, then confirm by exact title, author, and edition. Never queue a duplicate.
+  description: Search the owner's library, queue books for download and targeted push, or explicitly push, pull, and synchronize with reMarkable. Before adding, resolve ISBN-13, search by ISBN, then confirm by exact title, author, and edition. Never queue a duplicate.
   version: 0.1.0
 servers:
   - url: https://esbern.rishi.cx
@@ -39,7 +39,7 @@ paths:
     post:
       operationId: queueBook
       summary: Queue a book for installation
-      description: Queue one non-duplicate book for download and automatic reMarkable synchronization. Call only after ISBN and exact title-author-edition searches find no match. Returns immediately with a job ID.
+      description: Queue one non-duplicate book for download and an automatic targeted reMarkable push of only that new file. Do not queue a separate push or sync afterward. Call only after ISBN and exact title-author-edition searches find no match. Returns immediately with a job ID.
       security:
         - BearerAuth: []
       x-openai-isConsequential: true
@@ -63,6 +63,11 @@ paths:
                   type: string
                   enum: [auto, libgen, arxiv]
                   default: libgen
+                push_workers:
+                  type: integer
+                  minimum: 1
+                  maximum: 8
+                  default: 4
       responses:
         '202':
           description: Queued job
@@ -81,11 +86,45 @@ paths:
       responses:
         '200':
           description: Current job state
+  /api/jobs/push:
+    post:
+      operationId: queueLibraryPush
+      summary: Queue a one-way library push
+      description: Send local server books to reMarkable without pulling or scanning the full device library. Use only when explicitly requested.
+      security:
+        - BearerAuth: []
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workers:
+                  type: integer
+                  minimum: 1
+                  maximum: 8
+                  default: 4
+      responses:
+        '202':
+          description: Queued push job
+  /api/jobs/pull:
+    post:
+      operationId: queueLibraryPull
+      summary: Queue a one-way library pull
+      description: Download new or changed reMarkable books into the server library without pushing local books. Use only when explicitly requested.
+      security:
+        - BearerAuth: []
+      x-openai-isConsequential: true
+      responses:
+        '202':
+          description: Queued pull job
   /api/jobs/sync:
     post:
       operationId: queueLibrarySync
       summary: Queue a full library sync
-      description: Queue a two-way reconciliation of every configured library folder with reMarkable. Returns immediately with a job ID.
+      description: Queue a full two-way pull, deduplication, and push of every configured library folder. This is the slowest operation; use only when explicitly requested. Returns immediately with a job ID.
       security:
         - BearerAuth: []
       x-openai-isConsequential: true

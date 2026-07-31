@@ -37,6 +37,8 @@ from esbern.downloader import (
 )
 from esbern.remarkable import connected
 from esbern.sync import SUPPORTED_EXTS, SyncEvent
+from esbern.sync import pull as run_pull
+from esbern.sync import push as run_push
 from esbern.sync import sync as run_sync
 
 _CANONICAL_NAME = re.compile(
@@ -443,6 +445,7 @@ def _event_reporter(
     progress_callback: ProgressCallback | None = None,
     *,
     library: str = ".",
+    operation: str = "sync",
 ):
     def report(event: SyncEvent) -> None:
         if len(events) < 1_000:
@@ -455,7 +458,7 @@ def _event_reporter(
         if event.current is not None and event.total is not None:
             detail = f"{detail} · {event.current}/{event.total}"
         scope = "" if library == "." else f" ({library})"
-        progress_callback(f"reMarkable sync{scope}: {event.phase}", detail)
+        progress_callback(f"reMarkable {operation}{scope}: {event.phase}", detail)
 
     return report
 
@@ -537,6 +540,170 @@ def synchronize(
         )
 
 
+def _operation_result(
+    libraries: list[dict[str, object]],
+    totals: dict[str, int],
+) -> dict[str, object]:
+    return {
+        "ok": True,
+        "stats": totals,
+        "events": libraries[0]["events"] if len(libraries) == 1 else [],
+        "libraries": libraries,
+    }
+
+
+def _add_stats(totals: dict[str, int], stats: dict[str, int]) -> None:
+    for name, value in stats.items():
+        totals[name] = totals.get(name, 0) + value
+
+
+def _push(
+    root: Path,
+    *,
+    workers: int,
+    paths: Sequence[Path] | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, object]:
+    if not 1 <= workers <= 8:
+        raise ServerInputError("Push workers must be between 1 and 8.")
+    scopes = _sync_roots(root)
+    selected: dict[Path, list[Path]] | None = None
+    if paths is not None:
+        selected = {}
+        for path in paths:
+            candidate = path.resolve()
+            if candidate.is_symlink() or not candidate.is_file():
+                raise ServerInputError(f"Push path is not a file: {path}")
+            matching = [
+                scope
+                for scope in scopes
+                if scope == candidate.parent or scope in candidate.parents
+            ]
+            if not matching:
+                raise ServerInputError(
+                    f"Push path is outside a synchronized folder: {path}"
+                )
+            scope = max(matching, key=lambda item: len(item.parts))
+            selected.setdefault(scope, []).append(candidate.relative_to(scope))
+
+    cfg = config.load()
+    libraries: list[dict[str, object]] = []
+    totals: dict[str, int] = {}
+    scope_items = (
+        [(scope, selected[scope]) for scope in scopes if scope in selected]
+        if selected is not None
+        else [(scope, None) for scope in scopes]
+    )
+    for push_root, selected_paths in scope_items:
+        events: list[dict[str, object]] = []
+        library = push_root.relative_to(root).as_posix() if push_root != root else "."
+        if progress_callback:
+            progress_callback(
+                "Connecting to reMarkable for push",
+                None if library == "." else library,
+            )
+        with connected(cfg) as remarkable:
+            stats = run_push(
+                remarkable,
+                push_root,
+                restart=cfg.restart_xochitl,
+                reporter=_event_reporter(
+                    events,
+                    progress_callback,
+                    library=library,
+                    operation="push",
+                ),
+                workers=workers,
+                paths=selected_paths,
+            )
+        stats_payload = asdict(stats)
+        _add_stats(totals, stats_payload)
+        libraries.append(
+            {
+                "library": library,
+                "stats": stats_payload,
+                "events": events,
+            }
+        )
+    if progress_callback:
+        changed = totals.get("files_uploaded", 0) + totals.get("files_updated", 0)
+        progress_callback(
+            "reMarkable push complete",
+            f"{changed} file{'s' if changed != 1 else ''} deployed",
+        )
+    return _operation_result(libraries, totals)
+
+
+def push_library(
+    root: Path,
+    *,
+    workers: int = 4,
+    paths: Sequence[Path] | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, object]:
+    with _library_lock(root):
+        return _push(
+            root,
+            workers=workers,
+            paths=paths,
+            progress_callback=progress_callback,
+        )
+
+
+def _pull(
+    root: Path,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, object]:
+    cfg = config.load()
+    libraries: list[dict[str, object]] = []
+    totals: dict[str, int] = {}
+    for pull_root in _sync_roots(root):
+        events: list[dict[str, object]] = []
+        library = pull_root.relative_to(root).as_posix() if pull_root != root else "."
+        if progress_callback:
+            progress_callback(
+                "Connecting to reMarkable for pull",
+                None if library == "." else library,
+            )
+        with connected(cfg) as remarkable:
+            stats = run_pull(
+                remarkable,
+                pull_root,
+                reporter=_event_reporter(
+                    events,
+                    progress_callback,
+                    library=library,
+                    operation="pull",
+                ),
+            )
+        stats_payload = asdict(stats)
+        _add_stats(totals, stats_payload)
+        libraries.append(
+            {
+                "library": library,
+                "stats": stats_payload,
+                "events": events,
+            }
+        )
+    if progress_callback:
+        changed = totals.get("files_pulled", 0) + totals.get("files_repulled", 0)
+        progress_callback(
+            "reMarkable pull complete",
+            f"{changed} file{'s' if changed != 1 else ''} retrieved",
+        )
+    return _operation_result(libraries, totals)
+
+
+def pull_library(
+    root: Path,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, object]:
+    with _library_lock(root):
+        return _pull(root, progress_callback=progress_callback)
+
+
 def _query_list(raw: object) -> list[str]:
     if not isinstance(raw, list):
         raise ServerInputError("Queries must be a list.")
@@ -588,7 +755,7 @@ def _download_many(
     source: str,
     metadata: bool,
     jobs: int,
-    sync_workers: int,
+    push_workers: int,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, object]:
     if format_ not in {"auto", *SUPPORTED_FORMATS}:
@@ -690,30 +857,36 @@ def _download_many(
 
     downloaded = [downloaded_by_index[index] for index in sorted(downloaded_by_index)]
     failed = [failed_by_index[index] for index in sorted(failed_by_index)]
-    sync_result: dict[str, object] | None = None
-    if downloaded or skipped:
+    push_result: dict[str, object] | None = None
+    if downloaded:
         try:
             if progress_callback:
                 progress_callback(
-                    "Starting reMarkable sync",
-                    f"{len(downloaded)} downloaded, {len(skipped)} already present",
+                    "Starting targeted reMarkable push",
+                    f"{len(downloaded)} downloaded",
                 )
+            downloaded_paths = [root / str(book["relpath"]) for book in downloaded]
             if progress_callback:
-                sync_result = _sync(
+                push_result = _push(
                     root,
-                    workers=sync_workers,
+                    workers=push_workers,
+                    paths=downloaded_paths,
                     progress_callback=progress_callback,
                 )
             else:
-                sync_result = _sync(root, workers=sync_workers)
+                push_result = _push(
+                    root,
+                    workers=push_workers,
+                    paths=downloaded_paths,
+                )
         except Exception as error:  # noqa: BLE001 - downloads remain installed locally
-            sync_result = {
+            push_result = {
                 "ok": False,
                 "error": str(error),
                 "error_type": type(error).__name__,
             }
             if progress_callback:
-                progress_callback("reMarkable sync failed", str(error))
+                progress_callback("reMarkable push failed", str(error))
     if progress_callback:
         progress_callback(
             "Refreshing the library catalog",
@@ -723,7 +896,7 @@ def _download_many(
         "downloaded": downloaded,
         "skipped": skipped,
         "failed": failed,
-        "sync": sync_result,
+        "push": push_result,
         "catalog": catalog(root),
     }
 
@@ -741,11 +914,11 @@ def install_books(
     if not isinstance(metadata, bool):
         raise ServerInputError("Metadata must be true or false.")
     jobs = payload.get("jobs", 4)
-    sync_workers = payload.get("sync_workers", 4)
+    push_workers = payload.get("push_workers", payload.get("sync_workers", 4))
     if isinstance(jobs, bool) or not isinstance(jobs, int):
         raise ServerInputError("Jobs must be an integer.")
-    if isinstance(sync_workers, bool) or not isinstance(sync_workers, int):
-        raise ServerInputError("Sync workers must be an integer.")
+    if isinstance(push_workers, bool) or not isinstance(push_workers, int):
+        raise ServerInputError("Push workers must be an integer.")
     with _library_lock(root):
         return _download_many(
             root,
@@ -754,6 +927,6 @@ def install_books(
             source=source,
             metadata=metadata,
             jobs=jobs,
-            sync_workers=sync_workers,
+            push_workers=push_workers,
             progress_callback=progress_callback,
         )

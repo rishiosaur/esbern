@@ -14,7 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from esbern.downloader import ProgressCallback
-from esbern.server_library import install_books, synchronize
+from esbern.server_library import (
+    install_books,
+    pull_library,
+    push_library,
+    synchronize,
+)
 
 _MAX_PROGRESS_EVENTS = 200
 _MIN_PROGRESS_INTERVAL = 0.25
@@ -45,6 +50,12 @@ class JobStore:
 
     def enqueue_sync(self, payload: dict[str, object]) -> dict[str, object]:
         return self._enqueue("sync_library", payload, self._run_sync)
+
+    def enqueue_push(self, payload: dict[str, object]) -> dict[str, object]:
+        return self._enqueue("push_library", payload, self._run_push)
+
+    def enqueue_pull(self, payload: dict[str, object]) -> dict[str, object]:
+        return self._enqueue("pull_library", payload, self._run_pull)
 
     def _enqueue(
         self,
@@ -131,6 +142,42 @@ class JobStore:
             start_message="Starting library sync",
             finish_message="Library sync finished",
             failure_message="Library sync failed",
+        )
+
+    def _run_push(self, job_id: str, payload: dict[str, object]) -> None:
+        def push(progress_callback: ProgressCallback) -> dict[str, object]:
+            workers = payload.get("workers", 4)
+            if isinstance(workers, bool) or not isinstance(workers, int):
+                raise TypeError("Push workers must be an integer.")
+            return push_library(
+                self.library_root,
+                workers=workers,
+                progress_callback=progress_callback,
+            )
+
+        self._run_job(
+            job_id,
+            operation=push,
+            start_message="Starting library push",
+            finish_message="Library push finished",
+            failure_message="Library push failed",
+        )
+
+    def _run_pull(self, job_id: str, payload: dict[str, object]) -> None:
+        del payload
+
+        def pull(progress_callback: ProgressCallback) -> dict[str, object]:
+            return pull_library(
+                self.library_root,
+                progress_callback=progress_callback,
+            )
+
+        self._run_job(
+            job_id,
+            operation=pull,
+            start_message="Starting library pull",
+            finish_message="Library pull finished",
+            failure_message="Library pull failed",
         )
 
     def _run_job(
@@ -252,11 +299,11 @@ class JobStore:
                 "type": "InterruptedError",
                 "message": "The server restarted before this job completed.",
             }
-            operation = (
-                "Library sync"
-                if record.get("type") == "sync_library"
-                else "Book installation"
-            )
+            operation = {
+                "sync_library": "Library sync",
+                "push_library": "Library push",
+                "pull_library": "Library pull",
+            }.get(str(record.get("type")), "Book installation")
             previous = record.get("progress")
             sequence = (
                 int(previous.get("sequence", -1)) if isinstance(previous, dict) else -1

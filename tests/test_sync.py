@@ -22,6 +22,7 @@ from esbern.sync import (
     _ensure_subfolder,
     _walk_local,
     pull,
+    push,
     sync,
 )
 from esbern.tags import TagStore
@@ -115,7 +116,13 @@ def test_local_walk_never_follows_file_or_directory_symlinks(tmp_path) -> None:
 
 @pytest.mark.parametrize(
     "unsafe_relpath",
-    ["../outside.epub", "/tmp/outside.epub", "nested/../../outside.epub", "C:/outside.epub", "nested\\outside.epub"],
+    [
+        "../outside.epub",
+        "/tmp/outside.epub",
+        "nested/../../outside.epub",
+        "C:/outside.epub",
+        "nested\\outside.epub",
+    ],
 )
 def test_state_rejects_paths_that_can_escape_sync_root(
     tmp_path, unsafe_relpath
@@ -124,13 +131,7 @@ def test_state_rejects_paths_that_can_escape_sync_root(
     state_dir = local_root / ".esbern"
     state_dir.mkdir(parents=True)
     (state_dir / "state.json").write_text(
-        json.dumps(
-            {
-                "files": {
-                    unsafe_relpath: {"uuid": "book", "file_type": "epub"}
-                }
-            }
-        )
+        json.dumps({"files": {unsafe_relpath: {"uuid": "book", "file_type": "epub"}}})
     )
 
     with pytest.raises(ValueError, match="Unsafe file path"):
@@ -262,6 +263,40 @@ def test_sync_scope_is_named_after_selected_local_directory(
         for event in events
     )
     assert not any("Outside Book" in event.item for event in events)
+
+
+def test_targeted_push_uploads_only_selected_books_without_remote_pull(
+    tmp_path, monkeypatch
+) -> None:
+    local_root = tmp_path / "Books"
+    local_root.mkdir()
+    selected = local_root / "New Book.epub"
+    selected.write_bytes(b"new")
+    unselected = local_root / "Old Book.epub"
+    unselected.write_bytes(b"old")
+    rm = FakeRemarkable({"root": xochitl.collection_metadata("Books")})
+    State(root_uuid="root").save(local_root)
+
+    store = TagStore()
+    monkeypatch.setattr("esbern.sync.TagStore.load", lambda: store)
+    monkeypatch.setattr("esbern.sync.TagStore.save", lambda self: None)
+    monkeypatch.setattr("esbern.sync.categorize", lambda *args: [])
+
+    events: list[SyncEvent] = []
+    stats = push(
+        rm,
+        local_root,
+        restart=False,
+        reporter=events.append,
+        paths=[Path(selected.name)],
+    )
+
+    assert stats.files_uploaded == 1
+    assert [path for path, _remote in rm.uploads] == [selected]
+    assert rm.downloads == []
+    assert selected.name in State.load(local_root).files
+    assert unselected.name not in State.load(local_root).files
+    assert not any(unselected.name in event.item for event in events)
 
 
 @pytest.mark.parametrize("workers", [1, 2])
@@ -941,3 +976,57 @@ def test_pull_command_creates_named_remote_folder_under_destination(
     }
     assert (tmp_path / "Textbooks").is_dir()
     assert "[1/1] downloaded: A Textbook.pdf" in result.output
+
+
+def test_push_command_runs_one_way_without_selected_paths(
+    tmp_path, monkeypatch
+) -> None:
+    captured = {}
+
+    class _Connection:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *args):
+            return None
+
+    def fake_push(
+        rm,
+        root,
+        restart=True,
+        reporter=None,
+        workers=1,
+        paths=None,
+    ):
+        captured.update(
+            root=root,
+            restart=restart,
+            workers=workers,
+            paths=paths,
+        )
+        return SyncStats(files_uploaded=1)
+
+    monkeypatch.setattr(
+        "esbern.cli.config.load",
+        lambda: SimpleNamespace(
+            user="root",
+            host="remarkable",
+            restart_xochitl=False,
+        ),
+    )
+    monkeypatch.setattr("esbern.cli.connected", lambda cfg: _Connection())
+    monkeypatch.setattr("esbern.cli.run_push", fake_push)
+
+    result = CliRunner().invoke(
+        main,
+        ["push", "--path", str(tmp_path), "--workers", "3"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "root": Path(tmp_path).resolve(),
+        "restart": False,
+        "workers": 3,
+        "paths": None,
+    }
+    assert "Push complete: 1 new" in result.output

@@ -44,7 +44,7 @@ class InstallBookRequest(BaseModel):
     source: Literal["auto", "libgen", "arxiv"] = "libgen"
     metadata: bool = True
     jobs: int = Field(default=1, ge=1, le=32)
-    sync_workers: int = Field(default=4, ge=1, le=8)
+    push_workers: int = Field(default=4, ge=1, le=8)
 
 
 class SyncRequest(BaseModel):
@@ -52,8 +52,8 @@ class SyncRequest(BaseModel):
 
 
 def _mutation_status(result: dict[str, object], *, bulk: bool) -> int:
-    sync = result.get("sync")
-    if isinstance(sync, dict) and sync.get("ok") is False:
+    push = result.get("push")
+    if isinstance(push, dict) and push.get("ok") is False:
         return 502
     failed = result.get("failed")
     if isinstance(failed, list) and failed:
@@ -179,6 +179,8 @@ def create_app(library_root: Path) -> FastAPI:
                 "install": "POST /api/books",
                 "bulk_install": "POST text/plain to /api/books/bulk",
                 "queue_install": "POST /api/jobs/books",
+                "queue_push": "POST /api/jobs/push",
+                "queue_pull": "POST /api/jobs/pull",
                 "queue_sync": "POST /api/jobs/sync",
                 "job_status": "GET /api/jobs/{job_id}",
                 "sync": "POST /api/sync",
@@ -255,6 +257,31 @@ def create_app(library_root: Path) -> FastAPI:
         response.headers["Location"] = f"/api/jobs/{record['id']}"
         return record
 
+    @app.post(
+        "/api/jobs/push",
+        status_code=202,
+        tags=["jobs"],
+        dependencies=[Depends(authorize)],
+    )
+    def queue_push(
+        request: SyncRequest,
+        response: Response,
+    ) -> dict[str, object]:
+        record = jobs.enqueue_push(request.model_dump())
+        response.headers["Location"] = f"/api/jobs/{record['id']}"
+        return record
+
+    @app.post(
+        "/api/jobs/pull",
+        status_code=202,
+        tags=["jobs"],
+        dependencies=[Depends(authorize)],
+    )
+    def queue_pull(response: Response) -> dict[str, object]:
+        record = jobs.enqueue_pull({})
+        response.headers["Location"] = f"/api/jobs/{record['id']}"
+        return record
+
     @app.get(
         "/api/jobs/{job_id}",
         tags=["jobs"],
@@ -300,7 +327,7 @@ def create_app(library_root: Path) -> FastAPI:
                 "metadata": request.query_params.get("metadata", "true").casefold()
                 not in {"0", "false", "no"},
                 "jobs": _integer_query(request, "jobs", 4),
-                "sync_workers": _integer_query(request, "sync_workers", 4),
+                "push_workers": _integer_query(request, "push_workers", 4),
             },
         )
         response.status_code = _mutation_status(result, bulk=True)
@@ -352,7 +379,7 @@ def _chatgpt_action_schema() -> dict[str, object]:
             "title": "Esbern Library",
             "description": (
                 "Search the owner's book library and queue new books for download "
-                "and reMarkable synchronization. Before adding, resolve ISBN-13, "
+                "and targeted reMarkable push. Before adding, resolve ISBN-13, "
                 "search by ISBN, then confirm by exact title, author, and edition. "
                 "Do not queue a duplicate."
             ),
@@ -419,7 +446,7 @@ def _chatgpt_action_schema() -> dict[str, object]:
                     "summary": "Queue a book for installation",
                     "description": (
                         "Queue one non-duplicate book for download into Books and "
-                        "automatic reMarkable synchronization. Call only after ISBN "
+                        "an automatic targeted reMarkable push. Call only after ISBN "
                         "and exact title-author-edition searches find no match. Return "
                         "immediately with a job id."
                     ),
@@ -458,7 +485,7 @@ def _chatgpt_action_schema() -> dict[str, object]:
                                             "maximum": 32,
                                             "default": 1,
                                         },
-                                        "sync_workers": {
+                                        "push_workers": {
                                             "type": "integer",
                                             "minimum": 1,
                                             "maximum": 8,
@@ -483,7 +510,7 @@ def _chatgpt_action_schema() -> dict[str, object]:
                     "summary": "Check a background job",
                     "description": (
                         "Return queued, running, succeeded, or failed state, "
-                        "progress events, and the final result for a book or sync job."
+                        "progress events, and the final result for any library job."
                     ),
                     "security": [{"BearerAuth": []}],
                     "parameters": [
@@ -533,6 +560,60 @@ def _chatgpt_action_schema() -> dict[str, object]:
                     "responses": {
                         "202": {
                             "description": "Queued sync job",
+                            "content": {"application/json": {"schema": book_response}},
+                        }
+                    },
+                }
+            },
+            "/api/jobs/push": {
+                "post": {
+                    "operationId": "queueLibraryPush",
+                    "summary": "Queue a one-way library push",
+                    "description": (
+                        "Push local PDF and EPUB changes to reMarkable without "
+                        "scanning or downloading device books."
+                    ),
+                    "security": [{"BearerAuth": []}],
+                    "x-openai-isConsequential": True,
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "workers": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "maximum": 8,
+                                            "default": 4,
+                                        }
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "202": {
+                            "description": "Queued push job",
+                            "content": {"application/json": {"schema": book_response}},
+                        }
+                    },
+                }
+            },
+            "/api/jobs/pull": {
+                "post": {
+                    "operationId": "queueLibraryPull",
+                    "summary": "Queue a one-way library pull",
+                    "description": (
+                        "Retrieve new and changed books from reMarkable without "
+                        "uploading local books."
+                    ),
+                    "security": [{"BearerAuth": []}],
+                    "x-openai-isConsequential": True,
+                    "responses": {
+                        "202": {
+                            "description": "Queued pull job",
                             "content": {"application/json": {"schema": book_response}},
                         }
                     },

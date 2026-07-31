@@ -152,6 +152,10 @@ def test_chatgpt_action_schema_exposes_read_and_queued_write_tools(tmp_path) -> 
     assert sync["operationId"] == "queueLibrarySync"
     assert sync["x-openai-isConsequential"] is True
     assert sync["security"] == [{"BearerAuth": []}]
+    push = schema["paths"]["/api/jobs/push"]["post"]
+    assert push["operationId"] == "queueLibraryPush"
+    pull = schema["paths"]["/api/jobs/pull"]["post"]
+    assert pull["operationId"] == "queueLibraryPull"
     assert schema["paths"]["/api/jobs/{job_id}"]["get"]["operationId"] == "getJob"
 
 
@@ -162,12 +166,12 @@ def test_phone_client_can_queue_and_poll_an_authenticated_book_job(
     def installed(_root, _payload, *, progress_callback):
         progress_callback("Starting LibGen EPUB search", "A Book")
         progress_callback("Metadata saved", "A Book.epub")
-        progress_callback("reMarkable sync complete", "1 file change")
+        progress_callback("reMarkable push complete", "1 file deployed")
         return {
             "downloaded": [{"query": "A Book"}],
             "skipped": [],
             "failed": [],
-            "sync": {"ok": True},
+            "push": {"ok": True},
             "catalog": {"count": 3, "books": []},
         }
 
@@ -202,7 +206,7 @@ def test_phone_client_can_queue_and_poll_an_authenticated_book_job(
     messages = [event["message"] for event in current.json()["progress_events"]]
     assert "Starting LibGen EPUB search" in messages
     assert "Metadata saved" in messages
-    assert "reMarkable sync complete" in messages
+    assert "reMarkable push complete" in messages
     assert install.call_args.args[1]["queries"] == ["A Book"]
     assert callable(install.call_args.kwargs["progress_callback"])
 
@@ -251,6 +255,67 @@ def test_phone_client_can_queue_and_poll_an_authenticated_sync_job(
     assert callable(synchronize.call_args.kwargs["progress_callback"])
 
 
+@patch("esbern.server_jobs.push_library")
+def test_phone_client_can_queue_a_one_way_push(push_library, tmp_path) -> None:
+    def pushed(_root, *, workers, progress_callback):
+        progress_callback("reMarkable push: push", "uploaded: A Book.epub")
+        return {"ok": True, "stats": {"files_uploaded": 1}}
+
+    push_library.side_effect = pushed
+    headers = {"Authorization": "Bearer secret-token"}
+    with (
+        patch.dict(os.environ, {"ESBERN_API_TOKEN": "secret-token"}),
+        TestClient(create_app(tmp_path)) as client,
+    ):
+        queued = client.post(
+            "/api/jobs/push",
+            json={"workers": 3},
+            headers=headers,
+        )
+        job_id = queued.json()["id"]
+        deadline = time.monotonic() + 2
+        while True:
+            current = client.get(f"/api/jobs/{job_id}", headers=headers)
+            if current.json()["status"] in {"succeeded", "failed"}:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+    assert queued.status_code == 202
+    assert current.json()["type"] == "push_library"
+    assert current.json()["result"]["stats"]["files_uploaded"] == 1
+    push_library.assert_called_once()
+    assert push_library.call_args.kwargs["workers"] == 3
+
+
+@patch("esbern.server_jobs.pull_library")
+def test_phone_client_can_queue_a_one_way_pull(pull_library, tmp_path) -> None:
+    def pulled(_root, *, progress_callback):
+        progress_callback("reMarkable pull: pull", "downloaded: A Book.epub")
+        return {"ok": True, "stats": {"files_pulled": 1}}
+
+    pull_library.side_effect = pulled
+    headers = {"Authorization": "Bearer secret-token"}
+    with (
+        patch.dict(os.environ, {"ESBERN_API_TOKEN": "secret-token"}),
+        TestClient(create_app(tmp_path)) as client,
+    ):
+        queued = client.post("/api/jobs/pull", headers=headers)
+        job_id = queued.json()["id"]
+        deadline = time.monotonic() + 2
+        while True:
+            current = client.get(f"/api/jobs/{job_id}", headers=headers)
+            if current.json()["status"] in {"succeeded", "failed"}:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+    assert queued.status_code == 202
+    assert current.json()["type"] == "pull_library"
+    assert current.json()["result"]["stats"]["files_pulled"] == 1
+    pull_library.assert_called_once()
+
+
 def test_job_status_rejects_invalid_or_missing_ids(tmp_path) -> None:
     client = TestClient(create_app(tmp_path))
 
@@ -262,12 +327,12 @@ def test_job_status_rejects_invalid_or_missing_ids(tmp_path) -> None:
 
 
 @patch("esbern.web_server.install_books")
-def test_single_install_api_enables_automatic_sync(install, tmp_path) -> None:
+def test_single_install_api_enables_automatic_push(install, tmp_path) -> None:
     install.return_value = {
         "downloaded": [{"query": "A Book"}],
         "skipped": [],
         "failed": [],
-        "sync": {"ok": True},
+        "push": {"ok": True},
     }
     client = TestClient(create_app(tmp_path))
 
@@ -284,7 +349,7 @@ def test_bulk_api_accepts_the_contents_of_a_text_file(install, tmp_path) -> None
         "downloaded": [{"query": "First Book"}, {"query": "Second Book"}],
         "skipped": [],
         "failed": [],
-        "sync": {"ok": True},
+        "push": {"ok": True},
     }
     client = TestClient(create_app(tmp_path))
 
@@ -307,7 +372,7 @@ def test_mutation_routes_honor_optional_bearer_token(install, tmp_path) -> None:
         "downloaded": [],
         "skipped": [{"query": "A Book"}],
         "failed": [],
-        "sync": {"ok": True},
+        "push": {"ok": True},
     }
     client = TestClient(create_app(tmp_path))
     with patch.dict(os.environ, {"ESBERN_API_TOKEN": "secret-token"}):
@@ -323,11 +388,11 @@ def test_mutation_routes_honor_optional_bearer_token(install, tmp_path) -> None:
     assert install.call_count == 1
 
 
-@patch("esbern.server_library._sync")
+@patch("esbern.server_library._push")
 @patch("esbern.server_library.find_existing_book", return_value=None)
 @patch("esbern.server_library.download_book")
-def test_download_batch_runs_one_sync_after_all_downloads(
-    download, _find_existing, sync, tmp_path
+def test_download_batch_runs_one_targeted_push_after_all_downloads(
+    download, _find_existing, push, tmp_path
 ) -> None:
     def downloaded(query, destination, **_kwargs):
         path = destination / f"{query}.epub"
@@ -335,7 +400,7 @@ def test_download_batch_runs_one_sync_after_all_downloads(
         return DownloadedBook(query, path, "epub")
 
     download.side_effect = downloaded
-    sync.return_value = {"ok": True, "stats": {}, "events": []}
+    push.return_value = {"ok": True, "stats": {}, "events": []}
     with patch("esbern.server_library.google_books_api_key", return_value="key"):
         result = install_books(
             tmp_path,
@@ -343,7 +408,15 @@ def test_download_batch_runs_one_sync_after_all_downloads(
         )
 
     assert len(result["downloaded"]) == 2
-    sync.assert_called_once_with(tmp_path, workers=4)
+    assert result["push"]["ok"] is True
+    push.assert_called_once_with(
+        tmp_path,
+        workers=4,
+        paths=[
+            tmp_path / "First Book.epub",
+            tmp_path / "Second Book.epub",
+        ],
+    )
 
 
 def test_existing_child_states_are_independent_sync_roots(tmp_path) -> None:
@@ -355,11 +428,11 @@ def test_existing_child_states_are_independent_sync_roots(tmp_path) -> None:
     assert _sync_roots(tmp_path) == (tmp_path / "Books", tmp_path / "papers")
 
 
-@patch("esbern.server_library._sync")
+@patch("esbern.server_library._push")
 @patch("esbern.server_library.find_existing_book", return_value=None)
 @patch("esbern.server_library.download_book")
 def test_multi_scope_downloads_default_to_books(
-    download, _find_existing, sync, tmp_path
+    download, _find_existing, push, tmp_path
 ) -> None:
     for name in ("Books", "papers"):
         state = tmp_path / name / ".esbern" / "state.json"
@@ -372,25 +445,28 @@ def test_multi_scope_downloads_default_to_books(
         return DownloadedBook(query, path, "epub")
 
     download.side_effect = downloaded
-    sync.return_value = {"ok": True, "stats": {}, "events": []}
+    push.return_value = {"ok": True, "stats": {}, "events": []}
     with patch("esbern.server_library.google_books_api_key", return_value="key"):
         result = install_books(tmp_path, {"queries": ["A New Book"]})
 
     assert download.call_args.args[1] == tmp_path / "Books"
     assert result["downloaded"][0]["relpath"] == "Books/A New Book.epub"
-    sync.assert_called_once_with(tmp_path, workers=4)
+    push.assert_called_once_with(
+        tmp_path,
+        workers=4,
+        paths=[tmp_path / "Books" / "A New Book.epub"],
+    )
 
 
-@patch("esbern.server_library._sync")
+@patch("esbern.server_library._push")
 @patch("esbern.server_library.download_book")
-def test_download_skips_a_matching_book_in_a_nested_folder_and_still_syncs(
-    download, sync, tmp_path
+def test_download_skips_a_matching_book_without_contacting_remarkable(
+    download, push, tmp_path
 ) -> None:
     nested = tmp_path / "Fiction"
     nested.mkdir()
     existing = nested / "Ursula Le Guin - The Dispossessed (1974).epub"
     existing.write_bytes(b"existing")
-    sync.return_value = {"ok": True, "stats": {}, "events": []}
     with patch("esbern.server_library.google_books_api_key", return_value="key"):
         result = install_books(
             tmp_path,
@@ -399,7 +475,8 @@ def test_download_skips_a_matching_book_in_a_nested_folder_and_still_syncs(
 
     download.assert_not_called()
     assert result["skipped"][0]["relpath"] == "Fiction/" + existing.name
-    sync.assert_called_once_with(tmp_path, workers=4)
+    assert result["push"] is None
+    push.assert_not_called()
 
 
 @patch("esbern.web_server.synchronize")

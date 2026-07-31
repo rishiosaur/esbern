@@ -24,16 +24,20 @@ _TERMINAL_JOB_STATUSES = {"succeeded", "failed"}
 mcp = MCPServer(
     name="esbern-library",
     title="Esbern Library",
-    description="Search, add to, and synchronize a private book library.",
+    description="Search, add to, push, pull, and synchronize a private book library.",
     instructions=(
         "Before every addition, determine the edition's ISBN-13 without guessing. "
         "Search by ISBN first, then exact title, author, and edition because older "
         "records may not expose ISBN metadata. If either check finds the book, do not "
         "call add_book; return a 'Duplicate book error' and say nothing was added. "
         "Only add when the user clearly asks and no duplicate exists. Report the "
-        "download and reMarkable sync progress emitted by add_book. If that tool call "
+        "download and targeted reMarkable push progress emitted by add_book. Do not "
+        "call push_library after add_book because the add already pushes its new file. "
+        "If that tool call "
         "is interrupted, the background job keeps running; use check_job with the "
-        "reported job id to recover its latest progress and result. Only call "
+        "reported job id to recover its latest progress and result. Use push_library "
+        "for an explicit one-way local-to-device deployment and pull_library for an "
+        "explicit device-to-local retrieval. Only call "
         "sync_library when the user explicitly asks to synchronize their library, "
         "then report its live progress and terminal result."
     ),
@@ -177,7 +181,7 @@ async def add_book(
     format: Literal["auto", "epub", "pdf"] = "auto",
     source: Literal["auto", "libgen", "arxiv"] = "libgen",
 ) -> dict[str, Any]:
-    """Download a non-duplicate book, streaming steps through reMarkable sync.
+    """Download a non-duplicate book and push it to reMarkable with live progress.
 
     Determine ISBN-13 and search by ISBN, then exact title/author/edition. Never call
     this tool when either check finds the book. Call only after an explicit add request.
@@ -188,6 +192,50 @@ async def add_book(
         "POST",
         "/api/jobs/books",
         {"query": query, "format": format, "source": source},
+        authenticated=True,
+    )
+    return await _watch_job(context, record)
+
+
+@mcp.tool(
+    title="Push library to reMarkable",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+async def push_library(
+    context: Context,
+    workers: int = 4,
+) -> dict[str, Any]:
+    """Push local changes to reMarkable without scanning or pulling device books."""
+    record = await asyncio.to_thread(
+        _request,
+        "POST",
+        "/api/jobs/push",
+        {"workers": workers},
+        authenticated=True,
+    )
+    return await _watch_job(context, record)
+
+
+@mcp.tool(
+    title="Pull library from reMarkable",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+async def pull_library(context: Context) -> dict[str, Any]:
+    """Retrieve device changes without uploading local books, streaming progress."""
+    record = await asyncio.to_thread(
+        _request,
+        "POST",
+        "/api/jobs/pull",
         authenticated=True,
     )
     return await _watch_job(context, record)

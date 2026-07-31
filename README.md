@@ -81,11 +81,12 @@ replacement device only after verifying the connection.
 | ------------------ | -------------------------------------------------- |
 | `esbern init`      | Save SSH connection details                        |
 | `esbern ping`      | Verify the SSH connection                          |
-| `esbern get …`     | Download a book into the current sync folder       |
-| `esbern serve`     | Serve the cover grid and book/sync HTTP API         |
+| `esbern get …`     | Download a book and push the new file to reMarkable |
+| `esbern serve`     | Serve the cover grid and library HTTP API           |
 | `esbern normalize` | Preview/apply UUID-preserving library cleanup       |
 | `esbern dedup`     | Move byte-identical local duplicates to recovery   |
 | `esbern sync`      | Two-way sync (push + pull) for the current folder  |
+| `esbern push`      | Push local books to reMarkable without pulling      |
 | `esbern pull`      | Pull from the matching reMarkable folder only      |
 | `esbern status`    | Show sync state for the current folder             |
 | `esbern ls`        | Show a tree of local sync and tag status            |
@@ -113,13 +114,14 @@ port. The root page recursively finds every PDF and EPUB in the library and
 renders one cover image per file. EPUB cover art and first-page PDF images are
 used when available; otherwise Esbern generates a deterministic title cover.
 
-The JSON API exposes the same downloader and two-way sync engine as the CLI.
-A successful single or bulk download is installed locally first, then the
-entire library is synced with the configured reMarkable exactly once. When the
-library root contains existing independently synced folders, the sync route
-reconciles each one without creating a duplicate top-level collection. New
-downloads default to a synced folder named `Books`; set `ESBERN_INBOX_DIR` to a
-relative folder name to choose a different inbox:
+The JSON API exposes the same downloader and transfer engine as the CLI. A
+successful single or bulk download is installed locally first, then only the
+newly downloaded files are pushed to reMarkable. It does not pull or scan the
+full device library. Explicit push, pull, and two-way sync jobs remain available
+for maintenance. When the library root contains existing independently synced
+folders, each operation preserves those scopes without creating a duplicate
+top-level collection. New downloads default to a synced folder named `Books`;
+set `ESBERN_INBOX_DIR` to a relative folder name to choose a different inbox:
 
 ```sh
 # Catalog
@@ -145,6 +147,16 @@ curl -X POST 'http://server:3000/api/books/bulk?jobs=4' \
   -H 'Content-Type: text/plain' \
   --data-binary @books.txt
 
+# Push server books to reMarkable without pulling
+curl -X POST http://server:3000/api/jobs/push \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"workers":4}'
+
+# Pull reMarkable changes to the server without pushing
+curl -X POST http://server:3000/api/jobs/pull \
+  -H 'Authorization: Bearer <token>'
+
 # Reconcile all nested folders with the reMarkable
 curl -X POST http://server:3000/api/sync \
   -H 'Content-Type: application/json' \
@@ -152,7 +164,7 @@ curl -X POST http://server:3000/api/sync \
 ```
 
 Mutation routes are public unless `ESBERN_API_TOKEN` is set. When it is set,
-send `Authorization: Bearer <token>` with download and sync requests. Set
+send `Authorization: Bearer <token>` with download and transfer requests. Set
 `ESBERN_CORS_ORIGIN` to restrict cross-origin browser clients; it defaults to
 `*`. Put the server behind a reverse proxy if it is exposed beyond a trusted
 Tailscale network.
@@ -161,10 +173,13 @@ Phone-friendly ChatGPT and Claude setup lives in
 [`skills/manage-esbern-library`](skills/manage-esbern-library). ChatGPT uses
 the hosted OpenAPI action schema; Claude uses the hosted MCP connector. Both
 can list and search the public catalog, queue authenticated background book
-installs, launch a standalone full-library sync, and check job status. Claude's
-`add_book` and `sync_library` tools keep their MCP requests open and stream
-persisted progress; the underlying jobs continue if a request is interrupted.
-ChatGPT queues the same durable jobs and polls their status separately.
+installs, launch explicit push, pull, or full-sync jobs, and check job status.
+Book installs automatically push only their newly downloaded files, so
+assistants must not queue a separate transfer afterward. Claude's `add_book`,
+`push_library`, `pull_library`, and `sync_library` tools keep their MCP requests
+open and stream persisted progress; the underlying jobs continue if a request
+is interrupted. ChatGPT queues the same durable jobs and polls their status
+separately.
 
 Uploads use four parallel SSH workers by default. Each worker independently
 classifies and transfers a book, while completed books are checkpointed one at
@@ -173,7 +188,7 @@ a time so an interrupted run resumes safely. Use `esbern sync --workers N`
 interrupted after changing the device, Esbern still refreshes the reMarkable
 document service so completed uploads appear in the UI.
 
-Normal `sync` and `pull` runs are intentionally verbose. They show connection
+Normal `push`, `sync`, and `pull` runs are intentionally verbose. They show connection
 timing, every local entry examined, every book and folder inside the selected
 reMarkable subtree, live byte and speed progress for each transfer, tag
 classification, state saving, restart status, and a final summary. Unrelated
@@ -198,12 +213,18 @@ folder explicitly with `esbern pull Textbooks`; this creates `./Textbooks`
 and pulls the folder's contents into it. Pass `--path ~/reading` to create
 `~/reading/Textbooks` instead.
 
+`esbern push` is one-way: it uploads new or changed local books without
+performing a device pull. Pass `--path ~/reading` to choose a library root;
+otherwise it walks the current directory.
+
 ## Download books
 
 `esbern get` wraps the separately installed `libgen-downloader` command.
 It searches by title, author, or general terms, downloads into the current
-directory, and shows the current phase, filename, elapsed time, and bytes
-received. By default it tries EPUB first and falls back to PDF. LibGen books
+directory, pushes only the successfully downloaded files to reMarkable, and
+shows the current phase, filename, elapsed time, and bytes received. Use
+`--no-push` for a local-only download. By default it tries EPUB first and falls
+back to PDF. LibGen books
 are matched against Google Books (embedded ISBN first, validated title/author
 search second), then saved as `Author(s) - Title (year).epub` or `.pdf`.
 For EPUBs, title, authors, publication date, publisher, description, language,

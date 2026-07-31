@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -315,9 +315,7 @@ def _ensure_subfolder(
                 and parsed["parent"] == parent_uuid
                 and parsed["name"].casefold() == rel.name.casefold()
             ):
-                _emit(
-                    reporter, "item", "push", "folder unchanged", key, current, total
-                )
+                _emit(reporter, "item", "push", "folder unchanged", key, current, total)
                 return existing
             _emit(
                 reporter,
@@ -783,6 +781,45 @@ def _run_parallel_uploads(
             worker_rm.close()
 
 
+def _selected_push_entries(
+    local_root: Path,
+    paths: Sequence[Path],
+) -> list[tuple[Path, bool]]:
+    """Return selected files and their ancestor folders without walking the library."""
+    entries: set[tuple[Path, bool]] = set()
+    for raw_path in paths:
+        rel = Path(raw_path)
+        if rel.is_absolute() or rel == Path(".") or ".." in rel.parts:
+            raise ValueError(f"Push path must be relative to the library: {raw_path}")
+        candidate = local_root / rel
+        current = local_root
+        for part in rel.parts:
+            current /= part
+            if current.is_symlink():
+                raise ValueError(f"Push path must not contain symlinks: {raw_path}")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError as error:
+            raise FileNotFoundError(f"Push path does not exist: {raw_path}") from error
+        resolved_root = local_root.resolve()
+        if resolved_root not in resolved.parents:
+            raise ValueError(f"Push path escapes the library: {raw_path}")
+        if not resolved.is_file() or resolved.suffix.casefold() not in SUPPORTED_EXTS:
+            raise ValueError(f"Push path must be a PDF or EPUB: {raw_path}")
+        for parent in reversed(rel.parents):
+            if parent != Path("."):
+                entries.add((parent, True))
+        entries.add((rel, False))
+    return sorted(
+        entries,
+        key=lambda entry: (
+            len(entry[0].parts),
+            not entry[1],
+            entry[0].as_posix().casefold(),
+        ),
+    )
+
+
 def _push(
     rm: Remarkable,
     state: State,
@@ -791,8 +828,13 @@ def _push(
     stats: SyncStats,
     reporter: SyncReporter | None = None,
     workers: int = 1,
+    paths: Sequence[Path] | None = None,
 ) -> None:
-    entries = list(_walk_local(local_root))
+    entries = (
+        _selected_push_entries(local_root, paths)
+        if paths is not None
+        else list(_walk_local(local_root))
+    )
     folder_count = sum(1 for _, is_dir in entries if is_dir)
     books = [
         rel
@@ -1883,6 +1925,76 @@ def _resolve_pull_root(
         else:
             click.echo(f"  linked existing reMarkable folder: {message}")
     return existing
+
+
+def push(
+    rm: Remarkable,
+    local_root: Path,
+    restart: bool = True,
+    reporter: SyncReporter | None = None,
+    workers: int = 1,
+    paths: Sequence[Path] | None = None,
+) -> SyncStats:
+    """Push local books to reMarkable without scanning or pulling remote books."""
+    _emit(reporter, "phase", "setup", f"Loading state from {local_root}")
+    state = State.load(local_root)
+    store = TagStore.load()
+    store.scope_to(local_root)
+    stats = SyncStats()
+
+    try:
+        _emit(reporter, "phase", "setup", "Linking the reMarkable root for push")
+        _push(
+            rm,
+            state,
+            store,
+            local_root,
+            stats,
+            reporter,
+            workers=workers,
+            paths=paths,
+        )
+        _emit(reporter, "phase", "finish", "Saving push state and tags")
+        state.save(local_root)
+        store.save()
+    except BaseException:
+        changed = (
+            stats.files_uploaded
+            or stats.files_updated
+            or stats.folders_created
+            or stats.tags_assigned
+        )
+        if restart and changed:
+            _emit(
+                reporter,
+                "phase",
+                "finish",
+                "Push interrupted; refreshing reMarkable document service",
+            )
+            try:
+                rm.restart_xochitl()
+            except Exception as exc:  # noqa: BLE001 - preserve the original failure
+                _emit(
+                    reporter,
+                    "item",
+                    "finish",
+                    "document service refresh failed",
+                    str(exc),
+                )
+        raise
+
+    if restart and (
+        stats.files_uploaded
+        or stats.files_updated
+        or stats.folders_created
+        or stats.tags_assigned
+    ):
+        _emit(reporter, "phase", "finish", "Restarting reMarkable document service")
+        rm.restart_xochitl()
+    else:
+        _emit(reporter, "phase", "finish", "No device restart required")
+    _emit(reporter, "phase", "finish", "Push complete")
+    return stats
 
 
 def pull(

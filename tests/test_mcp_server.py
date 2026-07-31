@@ -9,6 +9,8 @@ from esbern.mcp_server import (
     check_job,
     get_full_library,
     mcp,
+    pull_library,
+    push_library,
     search_library,
     sync_library,
 )
@@ -23,6 +25,8 @@ def test_mcp_exposes_phone_assistant_tools_with_safe_annotations() -> None:
         "get_full_library",
         "search_library",
         "add_book",
+        "push_library",
+        "pull_library",
         "sync_library",
         "check_job",
     }
@@ -30,6 +34,8 @@ def test_mcp_exposes_phone_assistant_tools_with_safe_annotations() -> None:
     assert tools["search_library"].annotations.read_only_hint is True
     assert tools["add_book"].annotations.read_only_hint is False
     assert tools["add_book"].annotations.idempotent_hint is False
+    assert tools["push_library"].annotations.idempotent_hint is True
+    assert tools["pull_library"].annotations.idempotent_hint is True
     assert tools["sync_library"].annotations.read_only_hint is False
     assert tools["sync_library"].annotations.idempotent_hint is True
 
@@ -77,7 +83,7 @@ def test_mcp_write_and_status_tools_authenticate(request) -> None:
             "progress_events": [
                 {
                     "sequence": 2,
-                    "message": "reMarkable sync complete",
+                    "message": "reMarkable push complete",
                     "detail": "1 file change",
                 }
             ],
@@ -101,7 +107,7 @@ def test_mcp_write_and_status_tools_authenticate(request) -> None:
     assert [call.args[0] for call in progress] == [1.0, 2.0, 3.0]
     assert progress[0].kwargs["message"] == "Job abc: Queued"
     assert "Starting LibGen EPUB search" in progress[1].kwargs["message"]
-    assert "reMarkable sync complete" in progress[2].kwargs["message"]
+    assert "reMarkable push complete" in progress[2].kwargs["message"]
 
     assert request.call_args_list[0].args == (
         "POST",
@@ -119,6 +125,50 @@ def test_mcp_write_and_status_tools_authenticate(request) -> None:
     assert request.call_args_list[2].kwargs == {"authenticated": True}
     assert request.call_args_list[3].args == ("GET", "/api/jobs/abc")
     assert request.call_args_list[3].kwargs == {"authenticated": True}
+
+
+@patch("esbern.mcp_server._request")
+def test_mcp_push_and_pull_tools_queue_distinct_one_way_jobs(request) -> None:
+    request.side_effect = [
+        {
+            "id": "push-abc",
+            "status": "succeeded",
+            "progress_events": [
+                {
+                    "sequence": 0,
+                    "message": "Library push finished",
+                    "detail": None,
+                }
+            ],
+        },
+        {
+            "id": "pull-abc",
+            "status": "succeeded",
+            "progress_events": [
+                {
+                    "sequence": 0,
+                    "message": "Library pull finished",
+                    "detail": None,
+                }
+            ],
+        },
+    ]
+    push_context = SimpleNamespace(report_progress=AsyncMock())
+    pull_context = SimpleNamespace(report_progress=AsyncMock())
+
+    pushed = asyncio.run(push_library(push_context, workers=2))
+    pulled = asyncio.run(pull_library(pull_context))
+
+    assert pushed["status"] == "succeeded"
+    assert pulled["status"] == "succeeded"
+    assert request.call_args_list[0].args == (
+        "POST",
+        "/api/jobs/push",
+        {"workers": 2},
+    )
+    assert request.call_args_list[0].kwargs == {"authenticated": True}
+    assert request.call_args_list[1].args == ("POST", "/api/jobs/pull")
+    assert request.call_args_list[1].kwargs == {"authenticated": True}
 
 
 @patch("esbern.mcp_server._request")
