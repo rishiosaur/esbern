@@ -231,15 +231,6 @@ def check_job(job_id: str) -> dict[str, Any]:
     return _request("GET", f"/api/jobs/{job_id}", authenticated=True)
 
 
-@mcp.tool(
-    title="Check book job (legacy)",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
-)
-def check_book_job(job_id: str) -> dict[str, Any]:
-    """Compatibility alias for checking an existing book installation job."""
-    return check_job(job_id)
-
-
 def main() -> None:
     mcp.run(
         transport="streamable-http",

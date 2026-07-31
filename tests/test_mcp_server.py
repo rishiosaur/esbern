@@ -25,7 +25,6 @@ def test_mcp_exposes_phone_assistant_tools_with_safe_annotations() -> None:
         "add_book",
         "sync_library",
         "check_job",
-        "check_book_job",
     }
     assert tools["get_full_library"].annotations.read_only_hint is True
     assert tools["search_library"].annotations.read_only_hint is True
