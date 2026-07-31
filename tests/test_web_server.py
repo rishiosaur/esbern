@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import os
 import time
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import ANY, MagicMock, patch
 from zipfile import ZipFile
 
 from click.testing import CliRunner
 from fastapi.testclient import TestClient
 
+from esbern.book_metadata import BookMetadata
 from esbern.cli import main
 from esbern.downloader import DownloadedBook
+from esbern.library_metadata import LibraryMetadataPlan
 from esbern.server_library import (
     _sync_roots,
     catalog,
@@ -17,6 +20,7 @@ from esbern.server_library import (
     install_books,
     search_catalog,
 )
+from esbern.server_library import normalize_book as normalize_catalog_book
 from esbern.web_server import create_app
 
 
@@ -326,6 +330,50 @@ def test_phone_client_can_queue_a_one_way_pull(pull_library, tmp_path) -> None:
     pull_library.assert_called_once()
 
 
+@patch("esbern.server_jobs.normalize_book")
+def test_phone_client_can_queue_one_book_normalization(normalize, tmp_path) -> None:
+    def normalized(_root, *, book_id, query, workers, progress_callback):
+        progress_callback("Normalization: fallback", "Books/Messy.epub")
+        return {
+            "ok": True,
+            "book_id": book_id,
+            "mode": "local",
+            "new_relpath": "Books/Clean.epub",
+        }
+
+    normalize.side_effect = normalized
+    headers = {"Authorization": "Bearer secret-token"}
+    with (
+        patch.dict(os.environ, {"ESBERN_API_TOKEN": "secret-token"}),
+        TestClient(create_app(tmp_path)) as client,
+    ):
+        queued = client.post(
+            "/api/jobs/normalize",
+            json={
+                "book_id": "0123456789abcdef01234567",
+                "query": "Clean Book",
+                "workers": 2,
+            },
+            headers=headers,
+        )
+        job_id = queued.json()["id"]
+        deadline = time.monotonic() + 2
+        while True:
+            current = client.get(f"/api/jobs/{job_id}", headers=headers)
+            if current.json()["status"] in {"succeeded", "failed"}:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+    assert queued.status_code == 202
+    assert current.json()["type"] == "normalize_book"
+    assert current.json()["status"] == "succeeded"
+    assert current.json()["result"]["new_relpath"] == "Books/Clean.epub"
+    assert normalize.call_args.kwargs["book_id"] == "0123456789abcdef01234567"
+    assert normalize.call_args.kwargs["query"] == "Clean Book"
+    assert normalize.call_args.kwargs["workers"] == 2
+
+
 def test_job_status_rejects_invalid_or_missing_ids(tmp_path) -> None:
     client = TestClient(create_app(tmp_path))
 
@@ -427,6 +475,98 @@ def test_download_batch_runs_one_targeted_push_after_all_downloads(
             tmp_path / "Second Book.epub",
         ],
     )
+
+
+@patch("esbern.server_library.normalize_local_book")
+def test_normalize_untracked_book_is_local_only(normalize_local, tmp_path) -> None:
+    source = tmp_path / "Messy Book.epub"
+    source.write_bytes(b"book")
+    book_id = catalog(tmp_path)["books"][0]["id"]
+    destination = tmp_path / "Author - Clean Book (2024).epub"
+    metadata = BookMetadata(
+        google_id="",
+        title="Clean Book",
+        authors=("Author",),
+        published_date="2024",
+    )
+    normalize_local.return_value = (destination, metadata, "libgen")
+
+    with patch("esbern.server_library.google_books_api_key", return_value=""):
+        result = normalize_catalog_book(
+            tmp_path,
+            book_id=book_id,
+            query="Clean Book Author",
+        )
+
+    assert result["mode"] == "local"
+    assert result["new_relpath"] == destination.name
+    assert result["metadata_source"] == "libgen"
+    assert result["remarkable_updated"] is False
+    normalize_local.assert_called_once_with(
+        source,
+        "Clean Book Author",
+        api_key="",
+    )
+
+
+@patch("esbern.server_library.apply_library_metadata")
+@patch("esbern.server_library.plan_book_metadata")
+@patch("esbern.server_library.connected")
+def test_normalize_tracked_book_preserves_remote_identity(
+    connected, plan_book, apply_metadata, tmp_path
+) -> None:
+    source = tmp_path / "Messy Book.epub"
+    source.write_bytes(b"book")
+    book_id = catalog(tmp_path)["books"][0]["id"]
+    metadata = BookMetadata(
+        google_id="google-id",
+        title="Clean Book",
+        authors=("Author",),
+        published_date="2024",
+    )
+    plan_book.return_value = LibraryMetadataPlan(
+        source.name,
+        "Author - Clean Book (2024).epub",
+        metadata,
+    )
+    apply_metadata.return_value = SimpleNamespace(files_updated=1, files_renamed=1)
+    remarkable = MagicMock()
+    connected.return_value.__enter__.return_value = remarkable
+
+    with (
+        patch(
+            "esbern.server_library.State.load",
+            return_value=SimpleNamespace(files={source.name: object()}),
+        ),
+        patch(
+            "esbern.server_library.config.load",
+            return_value=SimpleNamespace(restart_xochitl=True),
+        ),
+        patch("esbern.server_library.google_books_api_key", return_value="key"),
+    ):
+        result = normalize_catalog_book(
+            tmp_path,
+            book_id=book_id,
+            query="Clean Book Author",
+            workers=2,
+        )
+
+    assert result["mode"] == "tracked"
+    assert result["remarkable_updated"] is True
+    plan_book.assert_called_once_with(
+        tmp_path,
+        source.name,
+        api_key="key",
+        query="Clean Book Author",
+        reporter=ANY,
+    )
+    apply_metadata.assert_called_once()
+    assert apply_metadata.call_args.args[1:] == (
+        tmp_path,
+        [plan_book.return_value],
+    )
+    assert apply_metadata.call_args.kwargs["workers"] == 2
+    remarkable.restart_xochitl.assert_called_once_with()
 
 
 @patch("esbern.server_library._push")

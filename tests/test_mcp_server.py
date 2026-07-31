@@ -9,6 +9,7 @@ from esbern.mcp_server import (
     check_job,
     get_full_library,
     mcp,
+    normalize_book,
     pull_library,
     push_library,
     search_library,
@@ -25,6 +26,7 @@ def test_mcp_exposes_phone_assistant_tools_with_safe_annotations() -> None:
         "get_full_library",
         "search_library",
         "add_book",
+        "normalize_book",
         "push_library",
         "pull_library",
         "sync_library",
@@ -34,6 +36,7 @@ def test_mcp_exposes_phone_assistant_tools_with_safe_annotations() -> None:
     assert tools["search_library"].annotations.read_only_hint is True
     assert tools["add_book"].annotations.read_only_hint is False
     assert tools["add_book"].annotations.idempotent_hint is False
+    assert tools["normalize_book"].annotations.idempotent_hint is False
     assert tools["push_library"].annotations.idempotent_hint is True
     assert tools["pull_library"].annotations.idempotent_hint is True
     assert tools["sync_library"].annotations.read_only_hint is False
@@ -169,6 +172,47 @@ def test_mcp_push_and_pull_tools_queue_distinct_one_way_jobs(request) -> None:
     assert request.call_args_list[0].kwargs == {"authenticated": True}
     assert request.call_args_list[1].args == ("POST", "/api/jobs/pull")
     assert request.call_args_list[1].kwargs == {"authenticated": True}
+
+
+@patch("esbern.mcp_server._request")
+def test_mcp_normalize_tool_queues_and_streams_one_book(request) -> None:
+    request.return_value = {
+        "id": "normalize-abc",
+        "status": "succeeded",
+        "progress_events": [
+            {
+                "sequence": 0,
+                "message": "Book normalization finished",
+                "detail": None,
+            }
+        ],
+    }
+    context = SimpleNamespace(report_progress=AsyncMock())
+
+    result = asyncio.run(
+        normalize_book(
+            "0123456789abcdef01234567",
+            context,
+            query="Tokyo Ueno Station Yu Miri",
+            workers=2,
+        )
+    )
+
+    assert result["status"] == "succeeded"
+    assert request.call_args.args == (
+        "POST",
+        "/api/jobs/normalize",
+        {
+            "book_id": "0123456789abcdef01234567",
+            "query": "Tokyo Ueno Station Yu Miri",
+            "workers": 2,
+        },
+    )
+    assert request.call_args.kwargs == {"authenticated": True}
+    assert (
+        context.report_progress.await_args.kwargs["message"]
+        == "Job normalize-abc: Book normalization finished"
+    )
 
 
 @patch("esbern.mcp_server._request")

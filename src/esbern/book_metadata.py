@@ -887,24 +887,39 @@ def resolve_book_metadata(
         )
 
 
-def normalize_download(
+def normalize_local_book(
     path: Path,
     query: str,
     *,
     api_key: str | None = None,
-) -> tuple[Path, BookMetadata]:
-    """Look up, embed (EPUB), and rename one downloaded book."""
+) -> tuple[Path, BookMetadata, str]:
+    """Resolve, embed (EPUB), and rename one local book without overwriting."""
     suffix = path.suffix.lower()
-    book, _source = resolve_book_metadata(path, query, api_key=api_key)
+    book, metadata_source = resolve_book_metadata(path, query, api_key=api_key)
     destination = path.with_name(canonical_filename(book, suffix))
-    if suffix == ".epub":
-        write_epub_metadata(path, book)
     with _CANONICAL_RENAME_LOCK:
         if destination != path and destination.exists():
             raise BookMetadataError(
                 f"canonical filename already exists: {destination.name}; "
                 f"download remains at {path}"
             )
+        if suffix == ".epub":
+            write_epub_metadata(path, book)
         if destination != path:
             path.replace(destination)
-    return destination.resolve(), book
+    return destination.resolve(), book, metadata_source
+
+
+def normalize_download(
+    path: Path,
+    query: str,
+    *,
+    api_key: str | None = None,
+) -> tuple[Path, BookMetadata]:
+    """Normalize one newly downloaded book."""
+    destination, book, _source = normalize_local_book(
+        path,
+        query,
+        api_key=api_key,
+    )
+    return destination, book

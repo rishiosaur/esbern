@@ -16,6 +16,7 @@ from pathlib import Path
 from esbern.downloader import ProgressCallback
 from esbern.server_library import (
     install_books,
+    normalize_book,
     pull_library,
     push_library,
     synchronize,
@@ -56,6 +57,9 @@ class JobStore:
 
     def enqueue_pull(self, payload: dict[str, object]) -> dict[str, object]:
         return self._enqueue("pull_library", payload, self._run_pull)
+
+    def enqueue_normalize(self, payload: dict[str, object]) -> dict[str, object]:
+        return self._enqueue("normalize_book", payload, self._run_normalize)
 
     def _enqueue(
         self,
@@ -178,6 +182,33 @@ class JobStore:
             start_message="Starting library pull",
             finish_message="Library pull finished",
             failure_message="Library pull failed",
+        )
+
+    def _run_normalize(self, job_id: str, payload: dict[str, object]) -> None:
+        def normalize(progress_callback: ProgressCallback) -> dict[str, object]:
+            book_id = payload.get("book_id")
+            query = payload.get("query", "")
+            workers = payload.get("workers", 4)
+            if not isinstance(book_id, str):
+                raise TypeError("Book id must be a string.")
+            if not isinstance(query, str):
+                raise TypeError("Normalization query must be a string.")
+            if isinstance(workers, bool) or not isinstance(workers, int):
+                raise TypeError("Metadata workers must be an integer.")
+            return normalize_book(
+                self.library_root,
+                book_id=book_id,
+                query=query,
+                workers=workers,
+                progress_callback=progress_callback,
+            )
+
+        self._run_job(
+            job_id,
+            operation=normalize,
+            start_message="Starting book normalization",
+            finish_message="Book normalization finished",
+            failure_message="Book normalization failed",
         )
 
     def _run_job(
@@ -303,6 +334,7 @@ class JobStore:
                 "sync_library": "Library sync",
                 "push_library": "Library push",
                 "pull_library": "Library pull",
+                "normalize_book": "Book normalization",
             }.get(str(record.get("type")), "Book installation")
             previous = record.get("progress")
             sequence = (

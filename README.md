@@ -177,10 +177,12 @@ can list and search the public catalog, queue authenticated background book
 installs, launch explicit push, pull, or full-sync jobs, and check job status.
 Book installs automatically push only their newly downloaded files, so
 assistants must not queue a separate transfer afterward. Claude's `add_book`,
-`push_library`, `pull_library`, and `sync_library` tools keep their MCP requests
-open and stream persisted progress; the underlying jobs continue if a request
-is interrupted. ChatGPT queues the same durable jobs and polls their status
-separately.
+`normalize_book`, `push_library`, `pull_library`, and `sync_library` tools keep
+their MCP requests open and stream persisted progress; the underlying jobs
+continue if a request is interrupted. `normalize_book` targets one exact catalog
+ID. It preserves the reMarkable UUID of a tracked book, while an untracked local
+book is cleaned without being pushed. ChatGPT queues its supported durable jobs
+and polls their status separately.
 
 Uploads use four parallel SSH workers by default. Each worker independently
 classifies and transfers a book, while completed books are checkpointed one at

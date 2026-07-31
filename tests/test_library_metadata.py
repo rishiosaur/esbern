@@ -18,6 +18,7 @@ from esbern.library_metadata import (
     _verified_authors,
     apply_library_metadata,
     load_library_metadata_plan,
+    plan_book_metadata,
     plan_library_metadata,
     resume_pending_library_metadata,
 )
@@ -222,6 +223,40 @@ def test_library_plan_uses_local_fallback_when_google_is_unavailable(
     assert ("fallback", "Messy Book.pdf") in reports
 
 
+def test_single_book_plan_does_not_resolve_other_tracked_books(
+    tmp_path, monkeypatch
+) -> None:
+    root, source = _library(tmp_path, file_type="pdf")
+    other = root / "Other Book.pdf"
+    other.write_bytes(b"other")
+    state = State.load(root)
+    other_stat = other.stat()
+    state.files[other.name] = FileEntry(
+        uuid="other",
+        file_type="pdf",
+        size=other_stat.st_size,
+        mtime=other_stat.st_mtime,
+    )
+    state.save(root)
+    calls = []
+
+    def resolve(path, query, **kwargs):
+        calls.append(path)
+        return BOOK, "google"
+
+    monkeypatch.setattr("esbern.library_metadata.resolve_book_metadata", resolve)
+
+    plan = plan_book_metadata(
+        root,
+        source.name,
+        api_key="secret",
+        query="Safe Systems Ada Lovelace",
+    )
+
+    assert plan.new_relpath == NEW_RELPATH.removesuffix(".epub") + ".pdf"
+    assert calls == [source]
+
+
 def test_all_epubs_are_prepared_in_parallel_before_device_writes(
     tmp_path, monkeypatch, isolated_tags
 ) -> None:
@@ -320,9 +355,7 @@ def test_loads_legacy_complete_plan_from_prepared_epub(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        "esbern.library_metadata.read_epub_metadata", lambda path: BOOK
-    )
+    monkeypatch.setattr("esbern.library_metadata.read_epub_metadata", lambda path: BOOK)
 
     plans = load_library_metadata_plan(root, backup)
 
@@ -530,9 +563,7 @@ def test_remote_failure_keeps_canonical_local_batch_pending_and_rolls_back_devic
     assert rm.restart_count == 1
 
 
-def test_resume_pending_updates_only_sentinel_entries(
-    tmp_path, isolated_tags
-) -> None:
+def test_resume_pending_updates_only_sentinel_entries(tmp_path, isolated_tags) -> None:
     root, source = _library(tmp_path)
     destination = root / NEW_RELPATH
     source.rename(destination)

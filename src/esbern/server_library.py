@@ -25,6 +25,7 @@ from esbern import config
 from esbern.book_metadata import (
     BookMetadataError,
     google_books_api_key,
+    normalize_local_book,
     read_epub_metadata,
 )
 from esbern.downloader import (
@@ -35,7 +36,9 @@ from esbern.downloader import (
     download_book,
     find_existing_book,
 )
+from esbern.library_metadata import apply_library_metadata, plan_book_metadata
 from esbern.remarkable import connected
+from esbern.state import State
 from esbern.sync import SUPPORTED_EXTS, SyncEvent
 from esbern.sync import pull as run_pull
 from esbern.sync import push as run_push
@@ -703,6 +706,113 @@ def pull_library(
 ) -> dict[str, object]:
     with _library_lock(root):
         return _pull(root, progress_callback=progress_callback)
+
+
+def normalize_book(
+    root: Path,
+    *,
+    book_id: str,
+    query: str = "",
+    workers: int = 4,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, object]:
+    """Normalize one catalog book, preserving its device UUID when tracked."""
+    if not 1 <= workers <= 32:
+        raise ServerInputError("Metadata workers must be between 1 and 32.")
+    if len(query) > _MAX_QUERY_LENGTH:
+        raise ServerInputError(
+            f"Normalization query must be {_MAX_QUERY_LENGTH} characters or fewer."
+        )
+
+    with _library_lock(root):
+        path, catalog_book = _book_path(root, book_id)
+        scopes = [
+            scope
+            for scope in _sync_roots(root)
+            if scope == path.parent or scope in path.parents
+        ]
+        if not scopes:
+            raise ServerInputError("Book is outside a synchronized library folder.")
+        scope = max(scopes, key=lambda item: len(item.parts))
+        relpath = path.relative_to(scope).as_posix()
+        library = scope.relative_to(root).as_posix() if scope != root else "."
+        lookup_query = (
+            query.strip()
+            or " ".join(
+                (
+                    catalog_book.title,
+                    *catalog_book.authors,
+                    catalog_book.year,
+                )
+            ).strip()
+        )
+        state = State.load(scope)
+
+        def report(action: str, detail: str) -> None:
+            if progress_callback is None:
+                return
+            scoped_detail = detail if library == "." else f"{library}: {detail}"
+            progress_callback(f"Normalization: {action}", scoped_detail)
+
+        if relpath not in state.files:
+            report("resolving local book", relpath)
+            destination, metadata, metadata_source = normalize_local_book(
+                path,
+                lookup_query,
+                api_key=google_books_api_key(),
+            )
+            new_relpath = destination.relative_to(root).as_posix()
+            report("local book normalized", new_relpath)
+            return {
+                "ok": True,
+                "mode": "local",
+                "old_relpath": path.relative_to(root).as_posix(),
+                "new_relpath": new_relpath,
+                "book_id": _book_id(new_relpath),
+                "metadata_source": metadata_source,
+                "metadata": asdict(metadata),
+                "remarkable_updated": False,
+            }
+
+        report("planning tracked book", relpath)
+        plan = plan_book_metadata(
+            scope,
+            relpath,
+            api_key=google_books_api_key(),
+            query=lookup_query,
+            reporter=report,
+        )
+        cfg = config.load()
+        report("connecting to reMarkable", relpath)
+        with connected(cfg) as remarkable:
+            result = apply_library_metadata(
+                remarkable,
+                scope,
+                [plan],
+                workers=workers,
+                reporter=report,
+            )
+            if cfg.restart_xochitl and result.files_updated:
+                report("refreshing reMarkable", plan.new_relpath)
+                remarkable.restart_xochitl()
+        root_relpath = (
+            Path(library) / plan.new_relpath
+            if library != "."
+            else Path(plan.new_relpath)
+        ).as_posix()
+        report("tracked book normalized", root_relpath)
+        return {
+            "ok": True,
+            "mode": "tracked",
+            "old_relpath": path.relative_to(root).as_posix(),
+            "new_relpath": root_relpath,
+            "book_id": _book_id(root_relpath),
+            "metadata_source": "google" if plan.metadata.google_id else "libgen",
+            "metadata": asdict(plan.metadata),
+            "files_updated": result.files_updated,
+            "files_renamed": result.files_renamed,
+            "remarkable_updated": True,
+        }
 
 
 def _query_list(raw: object) -> list[str]:

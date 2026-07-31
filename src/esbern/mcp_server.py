@@ -24,7 +24,9 @@ _TERMINAL_JOB_STATUSES = {"succeeded", "failed"}
 mcp = MCPServer(
     name="esbern-library",
     title="Esbern Library",
-    description="Search, add to, push, pull, and synchronize a private book library.",
+    description=(
+        "Search, add to, normalize, push, pull, and synchronize a private book library."
+    ),
     instructions=(
         "Before every addition, determine the edition's ISBN-13 without guessing. "
         "Search by ISBN first, then exact title, author, and edition because older "
@@ -37,7 +39,10 @@ mcp = MCPServer(
         "is interrupted, the background job keeps running; use check_job with the "
         "reported job id to recover its latest progress and result. Use push_library "
         "for an explicit one-way local-to-device deployment and pull_library for an "
-        "explicit device-to-local retrieval. Only call "
+        "explicit device-to-local retrieval. To normalize an existing book, search "
+        "first and pass its exact id to normalize_book. Normalization uses a local "
+        "LibGen/EPUB fallback when Google Books is unavailable and does not push an "
+        "untracked book. Only call "
         "sync_library when the user explicitly asks to synchronize their library, "
         "then report its live progress and terminal result."
     ),
@@ -198,6 +203,41 @@ async def add_book(
 
 
 @mcp.tool(
+    title="Normalize one existing book",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+async def normalize_book(
+    book_id: str,
+    context: Context,
+    query: str = "",
+    workers: int = 4,
+) -> dict[str, Any]:
+    """Clean one existing book's filename and metadata with live progress.
+
+    Search first and pass the exact book id. Google Books is tried when available;
+    otherwise Esbern cleans LibGen and embedded EPUB metadata locally. A tracked
+    book preserves its reMarkable UUID. An untracked book is not pushed by this tool.
+    """
+    record = await asyncio.to_thread(
+        _request,
+        "POST",
+        "/api/jobs/normalize",
+        {
+            "book_id": book_id,
+            "query": query,
+            "workers": workers,
+        },
+        authenticated=True,
+    )
+    return await _watch_job(context, record)
+
+
+@mcp.tool(
     title="Push library to reMarkable",
     annotations=ToolAnnotations(
         readOnlyHint=False,
@@ -275,7 +315,7 @@ async def sync_library(
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
 )
 def check_job(job_id: str) -> dict[str, Any]:
-    """Check a book installation or library sync job and its persisted progress."""
+    """Check any Esbern background job and its persisted progress."""
     return _request("GET", f"/api/jobs/{job_id}", authenticated=True)
 
 

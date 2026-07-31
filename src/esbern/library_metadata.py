@@ -426,6 +426,57 @@ def plan_library_metadata(
     return plans, failures
 
 
+def plan_book_metadata(
+    local_root: Path,
+    relpath: str,
+    *,
+    api_key: str | None,
+    query: str = "",
+    reporter: LibraryReporter | None = None,
+) -> LibraryMetadataPlan:
+    """Resolve one tracked book without planning the whole library."""
+    local_root = _absolute_root(local_root)
+    state = State.load(local_root)
+    if relpath not in state.files:
+        raise BookMetadataError(f"{relpath}: tracked state entry is missing")
+    path = _safe_local_path(local_root, relpath, role="source")
+    if not path.is_file():
+        raise BookMetadataError(f"{relpath}: local file is missing")
+    if path.suffix.lower() not in SUPPORTED_EXTS:
+        raise BookMetadataError(f"{relpath}: unsupported file type")
+
+    metadata = _load_metadata_overrides(local_root).get(relpath)
+    if metadata is None:
+        inferred_query, expected_title, expected_authors, strict_authors = (
+            _search_query(path)
+        )
+        metadata, metadata_source = resolve_book_metadata(
+            path,
+            query.strip() or inferred_query,
+            api_key=api_key,
+            expected_title=expected_title,
+            expected_authors=expected_authors,
+        )
+        if metadata_source == "libgen":
+            _emit(reporter, "fallback", relpath)
+        metadata = _verified_authors(metadata, expected_authors, strict_authors)
+    else:
+        _emit(reporter, "override", relpath)
+
+    new_name = canonical_filename(metadata, path.suffix)
+    new_relpath = (Path(relpath).parent / new_name).as_posix()
+    destination = _safe_local_path(local_root, new_relpath, role="destination")
+    occupied = {existing.casefold(): existing for existing in state.files}.get(
+        new_relpath.casefold()
+    )
+    if occupied is not None and occupied.casefold() != relpath.casefold():
+        raise BookMetadataError(f"{relpath}: canonical name is tracked as {occupied}")
+    if destination != path and destination.exists():
+        raise BookMetadataError(f"{relpath}: canonical filename already exists")
+    _emit(reporter, "planned", f"{relpath} -> {new_relpath}")
+    return LibraryMetadataPlan(relpath, new_relpath, metadata)
+
+
 def load_library_metadata_plan(
     local_root: Path,
     backup_or_plan: Path,

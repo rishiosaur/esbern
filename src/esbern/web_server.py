@@ -51,6 +51,12 @@ class SyncRequest(BaseModel):
     workers: int = Field(default=4, ge=1, le=8)
 
 
+class NormalizeBookRequest(BaseModel):
+    book_id: str = Field(pattern=r"^[0-9a-f]{24}$")
+    query: str = Field(default="", max_length=500)
+    workers: int = Field(default=4, ge=1, le=32)
+
+
 def _mutation_status(result: dict[str, object], *, bulk: bool) -> int:
     push = result.get("push")
     if isinstance(push, dict) and push.get("ok") is False:
@@ -181,6 +187,7 @@ def create_app(library_root: Path) -> FastAPI:
                 "queue_install": "POST /api/jobs/books",
                 "queue_push": "POST /api/jobs/push",
                 "queue_pull": "POST /api/jobs/pull",
+                "queue_normalize": "POST /api/jobs/normalize",
                 "queue_sync": "POST /api/jobs/sync",
                 "job_status": "GET /api/jobs/{job_id}",
                 "sync": "POST /api/sync",
@@ -279,6 +286,20 @@ def create_app(library_root: Path) -> FastAPI:
     )
     def queue_pull(response: Response) -> dict[str, object]:
         record = jobs.enqueue_pull({})
+        response.headers["Location"] = f"/api/jobs/{record['id']}"
+        return record
+
+    @app.post(
+        "/api/jobs/normalize",
+        status_code=202,
+        tags=["jobs"],
+        dependencies=[Depends(authorize)],
+    )
+    def queue_normalize(
+        request: NormalizeBookRequest,
+        response: Response,
+    ) -> dict[str, object]:
+        record = jobs.enqueue_normalize(request.model_dump())
         response.headers["Location"] = f"/api/jobs/{record['id']}"
         return record
 
