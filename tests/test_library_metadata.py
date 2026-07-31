@@ -186,13 +186,40 @@ def test_library_override_resolves_without_google(tmp_path, monkeypatch) -> None
         raise AssertionError("Google lookup should not run for an override")
 
     monkeypatch.setattr(
-        "esbern.library_metadata.lookup_google_books", unexpected_lookup
+        "esbern.library_metadata.resolve_book_metadata", unexpected_lookup
     )
 
     plans, failures = plan_library_metadata(root, api_key="secret")
 
     assert failures == []
     assert plans[0].new_relpath == NEW_RELPATH.removesuffix(".epub") + ".pdf"
+
+
+def test_library_plan_uses_local_fallback_when_google_is_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    root, _source = _library(tmp_path, file_type="pdf")
+    fallback = BookMetadata(
+        google_id="",
+        title="Safe Systems",
+        authors=("Ada Lovelace",),
+        published_date="2024",
+    )
+    reports = []
+    monkeypatch.setattr(
+        "esbern.library_metadata.resolve_book_metadata",
+        lambda *args, **kwargs: (fallback, "libgen"),
+    )
+
+    plans, failures = plan_library_metadata(
+        root,
+        api_key="exhausted",
+        reporter=lambda action, detail: reports.append((action, detail)),
+    )
+
+    assert failures == []
+    assert plans[0].new_relpath == NEW_RELPATH.removesuffix(".epub") + ".pdf"
+    assert ("fallback", "Messy Book.pdf") in reports
 
 
 def test_all_epubs_are_prepared_in_parallel_before_device_writes(

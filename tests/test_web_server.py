@@ -42,6 +42,16 @@ def test_catalog_recursively_lists_books_and_skips_internal_files(tmp_path) -> N
     assert result["books"][1]["folder"] == "Fiction"
 
 
+def test_catalog_parses_a_clean_fallback_filename_without_year(tmp_path) -> None:
+    (tmp_path / "Octavia Butler - Kindred.epub").write_bytes(b"book")
+
+    book = catalog(tmp_path)["books"][0]
+
+    assert book["title"] == "Kindred"
+    assert book["authors"] == ("Octavia Butler",)
+    assert book["year"] == ""
+
+
 def test_cover_uses_deterministic_svg_when_no_embedded_image_exists(tmp_path) -> None:
     (tmp_path / "Octavia Butler - Parable of the Sower (1993).pdf").write_bytes(
         b"not a real pdf"
@@ -416,6 +426,31 @@ def test_download_batch_runs_one_targeted_push_after_all_downloads(
             tmp_path / "First Book.epub",
             tmp_path / "Second Book.epub",
         ],
+    )
+
+
+@patch("esbern.server_library._push")
+@patch("esbern.server_library.find_existing_book", return_value=None)
+@patch("esbern.server_library.download_book")
+def test_server_allows_keyless_download_metadata_fallback(
+    download, _find_existing, push, tmp_path
+) -> None:
+    path = tmp_path / "Fallback Book.epub"
+    path.write_bytes(b"book")
+    download.return_value = DownloadedBook("Fallback Book", path, "epub")
+    push.return_value = {"ok": True, "stats": {}, "events": []}
+
+    with patch("esbern.server_library.google_books_api_key", return_value=""):
+        result = install_books(tmp_path, {"queries": ["Fallback Book"]})
+
+    assert len(result["downloaded"]) == 1
+    assert result["failed"] == []
+    assert download.call_args.kwargs["google_books_api_key"] == ""
+    assert download.call_args.kwargs["enrich_metadata"] is True
+    push.assert_called_once_with(
+        tmp_path,
+        workers=4,
+        paths=[path],
     )
 
 

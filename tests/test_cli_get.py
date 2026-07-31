@@ -145,16 +145,25 @@ class GetCommandTests(unittest.TestCase):
         self.assertIn("Pass book/search terms", result.output)
 
     @patch("esbern.cli.download_book")
-    def test_requires_google_key_before_libgen_download(self, download) -> None:
+    def test_keyless_download_uses_local_metadata_fallback(self, download) -> None:
+        download.return_value = DownloadedBook(
+            "Book",
+            Path("/tmp/Book.epub"),
+            "epub",
+        )
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("esbern.book_metadata.PROJECT_ENV_PATH", Path("/missing/.env")),
         ):
-            result = self.runner.invoke(main, ["get", "Book"])
+            result = self.runner.invoke(
+                main,
+                ["get", "Book", "--no-push"],
+            )
 
-        self.assertEqual(result.exit_code, 2)
-        self.assertIn("GOOGLE_BOOKS_API_KEY", result.output)
-        download.assert_not_called()
+        self.assertEqual(result.exit_code, 0, result.output)
+        download.assert_called_once()
+        self.assertEqual(download.call_args.kwargs["google_books_api_key"], "")
+        self.assertTrue(download.call_args.kwargs["enrich_metadata"])
 
     @patch("esbern.cli.download_book")
     def test_no_metadata_is_explicit_keyless_escape_hatch(self, download) -> None:

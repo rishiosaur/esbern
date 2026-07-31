@@ -20,10 +20,9 @@ from esbern.book_metadata import (
     BookMetadata,
     BookMetadataError,
     canonical_filename,
-    epub_isbns,
     epub_search_hints,
-    lookup_google_books,
     read_epub_metadata,
+    resolve_book_metadata,
     write_epub_metadata,
 )
 from esbern.remarkable import Remarkable
@@ -144,9 +143,7 @@ def _filename_hints(path: Path) -> tuple[str, tuple[str, ...], bool]:
         return "", (), False
 
     title = re.sub(r"\s+-\s+libgen\.li\s*$", "", title, flags=re.IGNORECASE)
-    title = re.sub(
-        r"\s+\((?=[^)]*(?:18|19|20)\d{2})[^)]*\)\s*$", "", title
-    )
+    title = re.sub(r"\s+\((?=[^)]*(?:18|19|20)\d{2})[^)]*\)\s*$", "", title)
     publisher_suffix = re.compile(
         r"\b(?:press|books?|publishing|publisher|classics?|library|gollancz|"
         r"harcourt|mariner|penguin|gateway|orbit|tor|bantam|knopf|fanucci|"
@@ -177,9 +174,7 @@ def _filename_hints(path: Path) -> tuple[str, tuple[str, ...], bool]:
         if not words:
             continue
         suffix = r"[\s,._-]+".join(re.escape(word) for word in words)
-        shortened = re.sub(
-            rf"[\s,._-]+{suffix}\s*$", "", title, flags=re.IGNORECASE
-        )
+        shortened = re.sub(rf"[\s,._-]+{suffix}\s*$", "", title, flags=re.IGNORECASE)
         if shortened != title:
             title = shortened
             break
@@ -195,9 +190,7 @@ def _search_query(path: Path) -> tuple[str, str, tuple[str, ...], bool]:
         embedded_title, embedded_authors = epub_search_hints(path)
         if title and embedded_title:
             expected_terms = set(re.findall(r"[^\W_]+", title.casefold()))
-            embedded_terms = set(
-                re.findall(r"[^\W_]+", embedded_title.casefold())
-            )
+            embedded_terms = set(re.findall(r"[^\W_]+", embedded_title.casefold()))
             coverage = (
                 len(expected_terms & embedded_terms) / len(expected_terms)
                 if expected_terms
@@ -219,9 +212,7 @@ def _verified_authors(
     """Discard catalog contributors contradicted by a clear filename author."""
     if not strict or not expected_authors:
         return metadata
-    expected_terms = set(
-        re.findall(r"[^\W_]+", " ".join(expected_authors).casefold())
-    )
+    expected_terms = set(re.findall(r"[^\W_]+", " ".join(expected_authors).casefold()))
     authors = tuple(
         author
         for author in metadata.authors
@@ -242,9 +233,7 @@ def _override_text(value: object, *, field: str, relpath: str) -> str:
 def _override_strings(value: object, *, field: str, relpath: str) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise BookMetadataError(f"{relpath}: override {field} must be a list")
-    values = tuple(
-        _override_text(item, field=field, relpath=relpath) for item in value
-    )
+    values = tuple(_override_text(item, field=field, relpath=relpath) for item in value)
     if any(not item for item in values):
         raise BookMetadataError(f"{relpath}: override {field} contains an empty value")
     return values
@@ -265,7 +254,9 @@ def _metadata_from_override(relpath: str, raw: object) -> BookMetadata:
                 f"{relpath}: metadata override is missing {required}"
             )
     book = BookMetadata(
-        google_id=_override_text(raw.get("google_id", ""), field="google_id", relpath=relpath),
+        google_id=_override_text(
+            raw.get("google_id", ""), field="google_id", relpath=relpath
+        ),
         title=_override_text(raw["title"], field="title", relpath=relpath),
         authors=_override_strings(raw["authors"], field="authors", relpath=relpath),
         published_date=_override_text(
@@ -306,7 +297,9 @@ def _load_metadata_overrides(local_root: Path) -> dict[str, BookMetadata]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise BookMetadataError(f"could not read metadata overrides: {error}") from error
+        raise BookMetadataError(
+            f"could not read metadata overrides: {error}"
+        ) from error
     if not isinstance(raw, dict):
         raise BookMetadataError("metadata overrides must be a JSON object")
     return {
@@ -328,9 +321,7 @@ def _save_metadata_overrides(
         values["isbn_10"] = list(metadata.isbn_10)
         values["isbn_13"] = list(metadata.isbn_13)
         payload[relpath] = {
-            key: value
-            for key, value in values.items()
-            if value not in ("", (), [])
+            key: value for key, value in values.items() if value not in ("", (), [])
         }
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -351,7 +342,7 @@ def _save_metadata_overrides(
 def plan_library_metadata(
     local_root: Path,
     *,
-    api_key: str,
+    api_key: str | None,
     reporter: LibraryReporter | None = None,
 ) -> tuple[list[LibraryMetadataPlan], list[LibraryMetadataFailure]]:
     """Resolve every tracked local book without changing disk or device state."""
@@ -385,20 +376,19 @@ def plan_library_metadata(
         try:
             metadata = overrides.get(relpath)
             if metadata is None:
-                isbns = epub_isbns(path) if path.suffix.lower() == ".epub" else ()
-                query, expected_title, expected_authors, strict_authors = (
-                    _search_query(path)
+                query, expected_title, expected_authors, strict_authors = _search_query(
+                    path
                 )
-                metadata = lookup_google_books(
+                metadata, metadata_source = resolve_book_metadata(
+                    path,
                     query,
-                    isbns=isbns,
                     api_key=api_key,
                     expected_title=expected_title,
                     expected_authors=expected_authors,
                 )
-                metadata = _verified_authors(
-                    metadata, expected_authors, strict_authors
-                )
+                if metadata_source == "libgen":
+                    _emit(reporter, "fallback", relpath)
+                metadata = _verified_authors(metadata, expected_authors, strict_authors)
             else:
                 _emit(reporter, "override", relpath)
         except BookMetadataError as error:
@@ -452,7 +442,9 @@ def load_library_metadata_plan(
     try:
         raw_plans = json.loads(plan_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise BookMetadataError(f"could not read saved metadata plan: {error}") from error
+        raise BookMetadataError(
+            f"could not read saved metadata plan: {error}"
+        ) from error
     if not isinstance(raw_plans, list):
         raise BookMetadataError("saved metadata plan must be a JSON array")
 
@@ -792,9 +784,7 @@ def _rollback_local_batch(
     except Exception as error:  # noqa: BLE001 - collect every rollback failure
         errors.append(f"tag restore failed: {error}")
     try:
-        _restore_overrides(
-            local_root, overrides_before, overrides_existed
-        )
+        _restore_overrides(local_root, overrides_before, overrides_existed)
     except Exception as error:  # noqa: BLE001 - collect every rollback failure
         errors.append(f"metadata override restore failed: {error}")
     return errors
@@ -1183,7 +1173,9 @@ def resume_pending_library_metadata(
         if path.is_symlink() or not path.is_file():
             raise BookMetadataError(f"{relpath}: pending local file is missing")
         if path.suffix.lower() != f".{entry.file_type}":
-            raise BookMetadataError(f"{relpath}: pending file type does not match state")
+            raise BookMetadataError(
+                f"{relpath}: pending file type does not match state"
+            )
         _emit(reporter, "updating", f"[{index}/{len(pending)}] {relpath}")
         try:
             if entry.file_type == "epub":

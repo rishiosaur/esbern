@@ -66,9 +66,10 @@ Requires Python 3.10+.
 3. `esbern init`, paste the password.
 4. `esbern ping` to verify.
 5. `export ESBERN_ANT_API_KEY=…` if you want LLM tagging.
-6. Put `GOOGLE_BOOKS_API_KEY=…` in the project `.env` (ignored by Git), or
-   export it in the shell, for normalized download metadata, names,
-   and library normalization.
+6. Optionally put `GOOGLE_BOOKS_API_KEY=…` in the project `.env` (ignored by
+   Git), or export it in the shell, for richer catalog metadata. Without a
+   working key, Esbern cleans the LibGen filename and embedded EPUB metadata
+   locally.
 
 For Wi-Fi sync, pass `--host <device-ip>` to `esbern init`.
 The first successful SSH connection pins the device host key in the private
@@ -224,23 +225,28 @@ It searches by title, author, or general terms, downloads into the current
 directory, pushes only the successfully downloaded files to reMarkable, and
 shows the current phase, filename, elapsed time, and bytes received. Use
 `--no-push` for a local-only download. By default it tries EPUB first and falls
-back to PDF. LibGen books
-are matched against Google Books (embedded ISBN first, validated title/author
-search second), then saved as `Author(s) - Title (year).epub` or `.pdf`.
-For EPUBs, title, authors, publication date, publisher, description, language,
-subjects, ISBNs, and the Google volume ID are written into the package metadata.
-Set `GOOGLE_BOOKS_API_KEY` before downloading:
+back to PDF. When available, LibGen books are matched against Google Books
+(embedded ISBN first, validated title/author search second), then saved as
+`Author(s) - Title (year).epub` or `.pdf`. If Google Books is unconfigured,
+quota-limited, or temporarily unavailable, Esbern instead repairs the LibGen
+filename, extracts its author/title/year, reuses embedded EPUB metadata, and
+continues the install and targeted push. A daily-quota response temporarily
+opens a circuit breaker so bulk work does not repeat doomed requests.
+
+For EPUBs, the resolved title, authors, publication date, publisher,
+description, language, subjects, and ISBNs are written into the package
+metadata. Google-enriched files also retain the Google volume ID:
 
 ```sh
 esbern get The Left Hand of Darkness Ursula Le Guin
 esbern get "The Left Hand of Darkness" --path ~/Documents/papers
 ```
 
-Google metadata is on by default. `--no-metadata` is an explicit escape hatch
+Metadata cleanup is on by default. `--no-metadata` is an explicit escape hatch
 for a download that should keep its source filename and embedded metadata.
-Metadata lookup sends the title, author terms, and any embedded ISBN to Google.
-The API key is never printed; prefer the environment variable to a command-line
-argument so it also stays out of shell history.
+When configured, Google lookup sends the title, author terms, and any embedded
+ISBN to Google. The API key is never printed; prefer the environment variable
+to a command-line argument so it also stays out of shell history.
 
 Use `--format epub` or `--format pdf` to require one format. For multiple
 books, put one query on each non-empty line of a UTF-8 text file:
@@ -273,10 +279,10 @@ individual query fails, and the command exits non-zero if any book failed.
 
 ## Normalize an existing synced library
 
-`esbern normalize` uses the same Google Books resolver for files already in a
-synced folder. The default is a read-only preview. It refuses an ambiguous
-catalog match or filename collision, and by default makes no changes unless
-every tracked file resolves:
+`esbern normalize` uses the same Google-first, local-fallback resolver for files
+already in a synced folder. The default is a read-only preview. With Google
+available it refuses ambiguous catalog matches; every mode refuses filename
+collisions and by default makes no changes unless every tracked file resolves:
 
 ```sh
 cd ~/reading/Books
@@ -284,9 +290,8 @@ esbern normalize
 esbern normalize --apply
 ```
 
-If a fully resolved run is interrupted—or Google Books is temporarily
-unavailable or quota-limited—reuse its recovery directory without performing
-new catalog requests:
+If a fully resolved run is interrupted, reuse its recovery directory without
+performing new catalog requests:
 
 ```sh
 esbern normalize --resume-plan .esbern/metadata-backups/<timestamp> --apply

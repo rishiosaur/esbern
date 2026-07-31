@@ -484,12 +484,6 @@ def get_book(
     if not bulk and not query:
         raise click.UsageError("Pass book/search terms or use --bulk INPUT.txt.")
     google_books_key = google_books_api_key(google_books_key)
-    if metadata and source.lower() != "arxiv" and not google_books_key:
-        raise click.UsageError(
-            "Google Books metadata is enabled but no API key is configured. "
-            "Set GOOGLE_BOOKS_API_KEY, pass --google-books-key, or explicitly "
-            "use --no-metadata."
-        )
 
     formats = SUPPORTED_FORMATS if format_.lower() == "auto" else (format_.lower(),)
     destination = path.resolve()
@@ -765,12 +759,9 @@ def normalize_library(
             failures = []
         else:
             google_books_key = google_books_api_key(google_books_key)
-            if not google_books_key:
-                raise click.UsageError(
-                    "Set GOOGLE_BOOKS_API_KEY or pass --google-books-key."
-                )
             console.print(
-                f"Resolving Google Books metadata for {len(state.files)} tracked books…",
+                f"Resolving metadata for {len(state.files)} tracked books "
+                "(Google Books with local fallback)…",
                 style="bold cyan",
                 markup=False,
             )

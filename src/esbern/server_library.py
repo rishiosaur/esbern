@@ -42,7 +42,8 @@ from esbern.sync import push as run_push
 from esbern.sync import sync as run_sync
 
 _CANONICAL_NAME = re.compile(
-    r"^(?P<authors>.+) - (?P<title>.+) \((?P<year>1\d{3}|20\d{2})\)$"
+    r"^(?P<authors>.+) - (?P<title>.+?)(?: "
+    r"\((?P<year>1\d{3}|20\d{2})\))?$"
 )
 _BOOK_ID = re.compile(r"^[0-9a-f]{24}$")
 _MAX_COVER_BYTES = 16 * 1024 * 1024
@@ -115,7 +116,7 @@ def _filename_metadata(path: Path) -> tuple[str, tuple[str, ...], str]:
     authors = tuple(
         author.strip() for author in match.group("authors").split(",") if author.strip()
     )
-    return match.group("title"), authors, match.group("year")
+    return match.group("title"), authors, match.group("year") or ""
 
 
 def _catalog_book(root: Path, path: Path) -> CatalogBook:
@@ -766,10 +767,6 @@ def _download_many(
         raise ServerInputError("Download jobs must be between 1 and 32.")
     formats = SUPPORTED_FORMATS if format_ == "auto" else (format_,)
     books_key = google_books_api_key()
-    if metadata and source != "arxiv" and not books_key:
-        raise ServerInputError(
-            "Google Books metadata is enabled but GOOGLE_BOOKS_API_KEY is not configured."
-        )
 
     pending: list[tuple[int, str]] = []
     skipped: list[dict[str, object]] = []
