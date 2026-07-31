@@ -1,0 +1,38 @@
+[Unit]
+Description=Esbern library server
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=esbern
+Group=esbern
+WorkingDirectory=/opt/esbern
+Environment=HOME=/var/lib/esbern
+Environment=ESBERN_CONFIG_DIR=/etc/esbern
+Environment=ESBERN_INBOX_DIR=Books
+Environment=PYTHONUNBUFFERED=1
+LoadCredential=api-token:/etc/esbern/api-token
+LoadCredential=google-books-api-key:/etc/esbern/google-books-api-key
+LoadCredential=anthropic-api-key:/etc/esbern/anthropic-api-key
+ExecStart=/opt/esbern/deploy/run-server.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+StateDirectory=esbern
+RuntimeDirectory=esbern
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/etc/esbern /srv/esbern/reading
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

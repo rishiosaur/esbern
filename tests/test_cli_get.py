@@ -30,10 +30,15 @@ class GetCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             book = Path(temp_dir) / "Book.epub"
             download.return_value = DownloadedBook("Book Name", book, "epub")
-            result = self.runner.invoke(main, ["get", "Book", "Name", "--path", temp_dir])
+            result = self.runner.invoke(
+                main,
+                ["get", "Book", "Name", "--path", temp_dir, "--no-push"],
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(download.call_args.args[:2], ("Book Name", Path(temp_dir).resolve()))
+        self.assertEqual(
+            download.call_args.args[:2], ("Book Name", Path(temp_dir).resolve())
+        )
         self.assertEqual(download.call_args.kwargs["formats"], ("epub", "pdf"))
         self.assertEqual(download.call_args.kwargs["source"], "libgen")
         self.assertEqual(
@@ -54,7 +59,8 @@ class GetCommandTests(unittest.TestCase):
                 DownloadedBook("Second Book", root / "Second.epub", "epub"),
             ]
             result = self.runner.invoke(
-                main, ["get", "-b", str(input_path), "--path", temp_dir]
+                main,
+                ["get", "-b", str(input_path), "--path", temp_dir, "--no-push"],
             )
 
         self.assertEqual(result.exit_code, 1, result.output)
@@ -91,7 +97,16 @@ class GetCommandTests(unittest.TestCase):
             input_path.write_text("First Book\nSecond Book\n", encoding="utf-8")
             result = self.runner.invoke(
                 main,
-                ["get", "-b", str(input_path), "--path", temp_dir, "--jobs", "2"],
+                [
+                    "get",
+                    "-b",
+                    str(input_path),
+                    "--path",
+                    temp_dir,
+                    "--jobs",
+                    "2",
+                    "--no-push",
+                ],
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
@@ -115,7 +130,8 @@ class GetCommandTests(unittest.TestCase):
                 "Second Book", root / "Second Book.epub", "epub"
             )
             result = self.runner.invoke(
-                main, ["get", "-b", str(input_path), "--path", temp_dir]
+                main,
+                ["get", "-b", str(input_path), "--path", temp_dir, "--no-push"],
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
@@ -129,28 +145,61 @@ class GetCommandTests(unittest.TestCase):
         self.assertIn("Pass book/search terms", result.output)
 
     @patch("esbern.cli.download_book")
-    def test_requires_google_key_before_libgen_download(self, download) -> None:
-        with patch.dict(os.environ, {}, clear=True), patch(
-            "esbern.book_metadata.PROJECT_ENV_PATH", Path("/missing/.env")
+    def test_keyless_download_uses_local_metadata_fallback(self, download) -> None:
+        download.return_value = DownloadedBook(
+            "Book",
+            Path("/tmp/Book.epub"),
+            "epub",
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("esbern.book_metadata.PROJECT_ENV_PATH", Path("/missing/.env")),
         ):
-            result = self.runner.invoke(main, ["get", "Book"])
+            result = self.runner.invoke(
+                main,
+                ["get", "Book", "--no-push"],
+            )
 
-        self.assertEqual(result.exit_code, 2)
-        self.assertIn("GOOGLE_BOOKS_API_KEY", result.output)
-        download.assert_not_called()
+        self.assertEqual(result.exit_code, 0, result.output)
+        download.assert_called_once()
+        self.assertEqual(download.call_args.kwargs["google_books_api_key"], "")
+        self.assertTrue(download.call_args.kwargs["enrich_metadata"])
 
     @patch("esbern.cli.download_book")
     def test_no_metadata_is_explicit_keyless_escape_hatch(self, download) -> None:
-        download.return_value = DownloadedBook(
-            "Book", Path("/tmp/Book.epub"), "epub"
-        )
-        with patch.dict(os.environ, {}, clear=True), patch(
-            "esbern.book_metadata.PROJECT_ENV_PATH", Path("/missing/.env")
+        download.return_value = DownloadedBook("Book", Path("/tmp/Book.epub"), "epub")
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("esbern.book_metadata.PROJECT_ENV_PATH", Path("/missing/.env")),
         ):
-            result = self.runner.invoke(main, ["get", "Book", "--no-metadata"])
+            result = self.runner.invoke(
+                main,
+                ["get", "Book", "--no-metadata", "--no-push"],
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(download.call_args.kwargs["enrich_metadata"])
+
+    @patch("esbern.cli._push_paths")
+    @patch("esbern.cli.download_book")
+    def test_single_download_pushes_only_the_new_book_by_default(
+        self, download, push_paths
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            book = root / "Book.epub"
+            book.write_bytes(b"book")
+            download.return_value = DownloadedBook("Book", book, "epub")
+
+            result = self.runner.invoke(
+                main,
+                ["get", "Book", "--path", temp_dir],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        push_paths.assert_called_once()
+        self.assertEqual(push_paths.call_args.args, (root, [book]))
+        self.assertEqual(push_paths.call_args.kwargs["workers"], 4)
 
 
 if __name__ == "__main__":

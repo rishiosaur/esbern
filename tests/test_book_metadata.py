@@ -12,10 +12,14 @@ from requests import RequestException
 from esbern.book_metadata import (
     BookMetadata,
     BookMetadataError,
+    GoogleBooksUnavailableError,
     canonical_filename,
     epub_isbns,
+    infer_libgen_metadata,
     lookup_google_books,
     normalize_download,
+    read_epub_metadata,
+    resolve_book_metadata,
 )
 
 CONTAINER = """<?xml version="1.0" encoding="UTF-8"?>
@@ -106,6 +110,7 @@ def test_normalizes_epub_from_exact_embedded_isbn(get, tmp_path) -> None:
     )
     assert metadata.publisher == "Example Press"
     assert epub_isbns(path) == ("9781234567897", "123456789X")
+    assert read_epub_metadata(path) == metadata
     assert get.call_args.kwargs["params"]["q"] == "isbn:9781234567897"
     assert get.call_args.kwargs["params"]["key"] == "secret-key"
 
@@ -135,6 +140,37 @@ def test_query_fallback_rejects_marketing_filename_fluff(get) -> None:
     )
 
     assert result.title == "Pachinko"
+
+
+def test_canonical_filename_drops_unsafe_punctuation_without_underscores() -> None:
+    book = BookMetadata(
+        google_id="id",
+        title='What Is This?: A / B * "Test"',
+        authors=("Ada Lovelace",),
+        published_date="2024",
+    )
+
+    assert canonical_filename(book, ".EPUB") == (
+        "Ada Lovelace - What Is This — A - B 'Test' (2024).epub"
+    )
+
+
+@patch("esbern.book_metadata.requests.get")
+def test_catalog_title_drops_generic_edition_and_marketing_fluff(get) -> None:
+    get.return_value = FakeResponse(
+        {
+            "items": [
+                _volume(
+                    title="The Dream Hotel",
+                    subtitle="A Read with Jenna Pick: A Novel",
+                )
+            ]
+        }
+    )
+
+    result = lookup_google_books("The Dream Hotel", api_key="secret")
+
+    assert result.title == "The Dream Hotel"
 
 
 @patch("esbern.book_metadata.requests.get")
@@ -197,6 +233,21 @@ def test_author_match_beats_derivative_title_that_mentions_the_authors(get) -> N
 
 
 @patch("esbern.book_metadata.requests.get")
+def test_expected_filename_hints_reject_a_different_author_and_title(get) -> None:
+    get.return_value = FakeResponse(
+        {"items": [_volume(title="Towards a History of Cantor's Problem")]}
+    )
+
+    with pytest.raises(BookMetadataError, match="author/title-verified"):
+        lookup_google_books(
+            "White Light Rudy Rucker",
+            api_key="secret",
+            expected_title="White Light or What is Cantor's Continuum Problem?",
+            expected_authors=("Rudy Rucker",),
+        )
+
+
+@patch("esbern.book_metadata.requests.get")
 def test_exact_isbn_query_does_not_require_title_overlap(get) -> None:
     get.return_value = FakeResponse(
         {"items": [_volume(title="A Completely Different Title", subtitle="")]}
@@ -217,8 +268,93 @@ def test_requires_google_books_api_key(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "esbern.book_metadata.PROJECT_ENV_PATH", tmp_path / "missing.env"
     )
-    with pytest.raises(BookMetadataError, match="GOOGLE_BOOKS_API_KEY"):
+    with pytest.raises(GoogleBooksUnavailableError, match="GOOGLE_BOOKS_API_KEY"):
         lookup_google_books("A Book")
+
+
+@patch("esbern.book_metadata._GOOGLE_BACKOFF_REASON", "")
+@patch("esbern.book_metadata._GOOGLE_BACKOFF_UNTIL", 0.0)
+@patch("esbern.book_metadata.requests.get")
+def test_daily_google_quota_uses_clean_libgen_metadata(get, tmp_path) -> None:
+    source = tmp_path / (
+        " YÅ«, Miri _ Giles, Morgan - Tokyo Ueno station "
+        "(2020, Riverhead Books_Penguin Publishing Group).epub"
+    )
+    _epub(source)
+    get.return_value = FakeResponse(
+        {
+            "error": {
+                "message": "Quota exceeded for Queries per day",
+                "details": [
+                    {
+                        "metadata": {
+                            "quota_limit": "defaultPerDayPerProject",
+                            "quota_unit": "1/d/{project}",
+                        }
+                    }
+                ],
+            }
+        },
+        status_code=429,
+    )
+
+    path, metadata = normalize_download(
+        source,
+        "Tokyo Ueno Station Yu Miri Morgan Giles 9780593187524",
+        api_key="exhausted-key",
+    )
+
+    assert get.call_count == 1
+    assert path.name == "Miri Yū, Morgan Giles - Tokyo Ueno Station (2020).epub"
+    assert metadata.google_id == ""
+    assert metadata.title == "Tokyo Ueno Station"
+    assert metadata.authors == ("Miri Yū", "Morgan Giles")
+    assert metadata.year == "2020"
+    assert read_epub_metadata(path) == metadata
+
+    second = tmp_path / "Butler, Octavia - Kindred (1979).pdf"
+    second.write_bytes(b"pdf")
+    second_metadata, second_source = resolve_book_metadata(
+        second,
+        "Kindred Octavia Butler",
+        api_key="exhausted-key",
+    )
+
+    assert get.call_count == 1
+    assert second_source == "libgen"
+    assert second_metadata.title == "Kindred"
+
+
+def test_missing_google_key_uses_libgen_filename_for_pdf(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("GOOGLE_BOOKS_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "esbern.book_metadata.PROJECT_ENV_PATH", tmp_path / "missing.env"
+    )
+    source = tmp_path / "Le Guin, Ursula - The Dispossessed (1974, Harper).pdf"
+    source.write_bytes(b"pdf")
+
+    metadata, source_name = resolve_book_metadata(
+        source,
+        "The Dispossessed Ursula Le Guin",
+    )
+
+    assert source_name == "libgen"
+    assert metadata.title == "The Dispossessed"
+    assert metadata.authors == ("Ursula Le Guin",)
+    assert metadata.year == "1974"
+
+
+def test_libgen_fallback_can_name_a_book_without_a_year(tmp_path) -> None:
+    source = tmp_path / "Butler, Octavia - Kindred.pdf"
+    source.write_bytes(b"pdf")
+
+    metadata = infer_libgen_metadata(source, "Kindred Octavia Butler")
+
+    assert canonical_filename(metadata, source.suffix) == (
+        "Octavia Butler - Kindred.pdf"
+    )
 
 
 @patch("esbern.book_metadata.requests.get")

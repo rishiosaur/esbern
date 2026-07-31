@@ -19,8 +19,8 @@ from esbern.config import Config
 
 _T = TypeVar("_T")
 _CONNECT_TIMEOUT_SECONDS = 10
-_OPERATION_TIMEOUT_SECONDS = 15
-_ATTEMPTS = 2
+_OPERATION_TIMEOUT_SECONDS = 120
+_ATTEMPTS = 5
 _HOST_KEY_LOCK = threading.Lock()
 
 
@@ -169,6 +169,28 @@ class Remarkable:
     def newest_mtime(self, *paths: str) -> float:
         return max((self.stat_mtime(p) for p in paths), default=0.0)
 
+    def _atomic_replace(
+        self,
+        remote: str,
+        write: Callable[[paramiko.SFTPClient, str], None],
+    ) -> None:
+        temporary = f"{remote}.esbern-{secrets.token_hex(8)}.upload"
+
+        def replace(sftp: paramiko.SFTPClient) -> None:
+            write(sftp, temporary)
+            # OpenSSH's posix-rename extension atomically replaces the old
+            # file only after the complete temporary write is durable.
+            sftp.posix_rename(temporary, remote)
+
+        try:
+            self._sftp_call(replace)
+        finally:
+            if self._sftp is not None:
+                try:
+                    self._sftp_call(lambda sftp: sftp.remove(temporary))
+                except (EOFError, OSError, paramiko.SSHException):
+                    pass
+
     def annotation_dir_mtime(self, uid: str) -> float:
         """Newest mtime among files inside <uuid>/ (annotation pages, thumbnails)."""
         d = self.remote_path(uid)
@@ -179,11 +201,11 @@ class Remarkable:
         return max((e.st_mtime or 0.0 for e in entries), default=0.0)
 
     def put_text(self, remote: str, text: str) -> None:
-        def write(sftp: paramiko.SFTPClient) -> None:
-            with sftp.file(remote, "w") as f:
+        def write(sftp: paramiko.SFTPClient, temporary: str) -> None:
+            with sftp.file(temporary, "w") as f:
                 f.write(text)
 
-        self._sftp_call(write)
+        self._atomic_replace(remote, write)
 
     def get_text(self, remote: str) -> str:
         def read(sftp: paramiko.SFTPClient) -> str:
@@ -198,7 +220,39 @@ class Remarkable:
         remote: str,
         callback: Callable[[int, int], None] | None = None,
     ) -> None:
-        self._sftp_call(lambda sftp: sftp.put(str(local), remote, callback=callback))
+        def upload(sftp: paramiko.SFTPClient, temporary: str) -> None:
+            total = local.stat().st_size
+            try:
+                remote_size = int(sftp.stat(temporary).st_size or 0)
+            except FileNotFoundError:
+                remote_size = 0
+            if remote_size < 0 or remote_size > total:
+                sftp.remove(temporary)
+                remote_size = 0
+
+            with local.open("rb") as source:
+                source.seek(remote_size)
+                mode = "r+b" if remote_size else "wb"
+                with sftp.file(temporary, mode) as target:
+                    if remote_size:
+                        target.seek(remote_size)
+                    target.set_pipelined(True)
+                    sent = remote_size
+                    if callback is not None:
+                        callback(sent, total)
+                    while chunk := source.read(256 * 1024):
+                        target.write(chunk)
+                        sent += len(chunk)
+                        if callback is not None:
+                            callback(sent, total)
+
+            uploaded = int(sftp.stat(temporary).st_size or 0)
+            if uploaded != total:
+                raise OSError(
+                    f"incomplete temporary upload: {uploaded} of {total} bytes"
+                )
+
+        self._atomic_replace(remote, upload)
 
     def get_file(
         self,

@@ -80,6 +80,40 @@ class DownloadPolicyTests(unittest.TestCase):
         self.assertEqual(result.path, canonical)
         self.assertEqual(result.metadata, metadata)
 
+    @patch("esbern.downloader.normalize_download")
+    @patch("esbern.downloader._run_attempt")
+    def test_reports_local_fallback_when_google_is_unavailable(
+        self, run_attempt, normalize
+    ) -> None:
+        raw = Path("/tmp/raw.epub")
+        canonical = Path("/tmp/Author - Title (2024).epub")
+        metadata = BookMetadata(
+            google_id="",
+            title="Title",
+            authors=("Author",),
+            published_date="2024",
+        )
+        run_attempt.return_value = _AttemptResult(0, raw, ())
+        normalize.return_value = (canonical, metadata)
+        progress = []
+
+        result = download_book(
+            "Title Author",
+            Path("/tmp"),
+            executable="fake",
+            google_books_api_key="exhausted",
+            progress_callback=lambda status, detail: progress.append((status, detail)),
+        )
+
+        self.assertEqual(result.path, canonical)
+        self.assertIn(
+            (
+                "Google Books unavailable; LibGen metadata cleaned",
+                canonical.name,
+            ),
+            progress,
+        )
+
     def test_rejects_short_search_terms(self) -> None:
         with self.assertRaisesRegex(BookDownloadError, "at least 3"):
             download_book("it", Path("/tmp"), console=self.console,

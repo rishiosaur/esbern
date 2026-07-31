@@ -58,7 +58,11 @@ class _AttemptResult:
         for line in reversed(self.output):
             if line.lower().startswith("error:"):
                 return line.split(":", 1)[1].strip()
-        return self.output[-1] if self.output else "the downloader exited without an error message"
+        return (
+            self.output[-1]
+            if self.output
+            else "the downloader exited without an error message"
+        )
 
 
 class BookDownloadError(RuntimeError):
@@ -67,8 +71,11 @@ class BookDownloadError(RuntimeError):
 
 def read_bulk_queries(path: Path) -> list[str]:
     """Read non-empty UTF-8 lines, accepting a BOM from text editors."""
-    return [line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines()
-            if line.strip()]
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8-sig").splitlines()
+        if line.strip()
+    ]
 
 
 def find_existing_book(query: str, directory: Path) -> Path | None:
@@ -120,8 +127,9 @@ def _snapshot(directory: Path, extension: str) -> dict[Path, tuple[int, int]]:
     return snapshot
 
 
-def _changed_file(directory: Path, extension: str,
-                  before: dict[Path, tuple[int, int]]) -> Path | None:
+def _changed_file(
+    directory: Path, extension: str, before: dict[Path, tuple[int, int]]
+) -> Path | None:
     changed: list[tuple[int, Path]] = []
     for path, state in _snapshot(directory, extension).items():
         if before.get(path) != state:
@@ -134,16 +142,20 @@ def _path_from_output(lines: Sequence[str], output_directory: Path) -> Path | No
     for line in reversed(lines):
         if not line.startswith(prefix):
             continue
-        path = Path(line[len(prefix):].strip()).expanduser()
+        path = Path(line[len(prefix) :].strip()).expanduser()
         if not path.is_absolute():
             path = output_directory / path
         return path.resolve()
     return None
 
 
-def _drain_lines(lines: queue.SimpleQueue[str], collected: list[str],
-                 progress: Progress, task_id: int,
-                 progress_callback: ProgressCallback | None = None) -> None:
+def _drain_lines(
+    lines: queue.SimpleQueue[str],
+    collected: list[str],
+    progress: Progress,
+    task_id: int,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
     while True:
         try:
             line = lines.get_nowait()
@@ -159,15 +171,23 @@ def _drain_lines(lines: queue.SimpleQueue[str], collected: list[str],
                 progress_callback(cleaned, None)
 
 
-def _run_attempt_in_directory(executable: str, query: str, book_format: str,
-                              working_directory: Path,
-                              console: Console,
-                              progress_callback: ProgressCallback | None = None
-                              ) -> _AttemptResult:
+def _run_attempt_in_directory(
+    executable: str,
+    query: str,
+    book_format: str,
+    working_directory: Path,
+    console: Console,
+    progress_callback: ProgressCallback | None = None,
+) -> _AttemptResult:
     before = _snapshot(working_directory, book_format)
     command = [
-        executable, "get", query, "--format", book_format,
-        "--output", str(working_directory),
+        executable,
+        "get",
+        query,
+        "--format",
+        book_format,
+        "--output",
+        str(working_directory),
     ]
 
     try:
@@ -205,9 +225,7 @@ def _run_attempt_in_directory(executable: str, query: str, book_format: str,
     )
     with progress:
         initial_status = f"Starting LibGen {book_format.upper()} search…"
-        task_id = progress.add_task(
-            initial_status, total=None, detail=""
-        )
+        task_id = progress.add_task(initial_status, total=None, detail="")
         if progress_callback:
             progress_callback(initial_status, None)
         try:
@@ -249,9 +267,11 @@ def _run_attempt_in_directory(executable: str, query: str, book_format: str,
             except FileNotFoundError:
                 size = 0
             progress.update(task_id, detail=f"{candidate.name} · {_human_bytes(size)}")
-        final_status = (f"LibGen {book_format.upper()} complete"
-                        if process.returncode == 0
-                        else f"LibGen {book_format.upper()} unavailable")
+        final_status = (
+            f"LibGen {book_format.upper()} complete"
+            if process.returncode == 0
+            else f"LibGen {book_format.upper()} unavailable"
+        )
         progress.update(task_id, description=final_status)
         if progress_callback:
             progress_callback(final_status, None)
@@ -259,9 +279,13 @@ def _run_attempt_in_directory(executable: str, query: str, book_format: str,
     process.stdout.close()
 
     reported_path = _path_from_output(collected, working_directory)
-    downloaded_path = reported_path if reported_path and reported_path.exists() else changed_path
+    downloaded_path = (
+        reported_path if reported_path and reported_path.exists() else changed_path
+    )
     if process.returncode == 0 and downloaded_path is None:
-        collected.append("Error: the downloader reported success but no downloaded file was found")
+        collected.append(
+            "Error: the downloader reported success but no downloaded file was found"
+        )
         return _AttemptResult(1, None, tuple(collected))
     return _AttemptResult(process.returncode or 0, downloaded_path, tuple(collected))
 
@@ -277,16 +301,25 @@ def _unique_destination(path: Path) -> Path:
     raise BookDownloadError(f"Could not find an unused filename for {path.name}.")
 
 
-def _run_attempt(executable: str, query: str, book_format: str,
-                 output_directory: Path, console: Console,
-                 progress_callback: ProgressCallback | None = None) -> _AttemptResult:
+def _run_attempt(
+    executable: str,
+    query: str,
+    book_format: str,
+    output_directory: Path,
+    console: Console,
+    progress_callback: ProgressCallback | None = None,
+) -> _AttemptResult:
     """Download through a staging directory so partial files are never synced."""
     output_directory.mkdir(parents=True, exist_ok=True)
     staging_parent = output_directory / ".esbern"
     staging_parent.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="get-", dir=staging_parent) as temp_dir:
         attempt = _run_attempt_in_directory(
-            executable, query, book_format, Path(temp_dir), console,
+            executable,
+            query,
+            book_format,
+            Path(temp_dir),
+            console,
             progress_callback,
         )
         if attempt.returncode != 0 or attempt.path is None:
@@ -299,13 +332,19 @@ def _run_attempt(executable: str, query: str, book_format: str,
                 attempt.path.replace(destination)
         except OSError as error:
             return _AttemptResult(
-                1, None, attempt.output + (f"Error: could not save the download: {error}",)
+                1,
+                None,
+                attempt.output + (f"Error: could not save the download: {error}",),
             )
         return _AttemptResult(0, destination.resolve(), attempt.output)
 
 
-def _download_from_arxiv(query: str, output_directory: Path, console: Console,
-                         progress_callback: ProgressCallback | None = None) -> Path:
+def _download_from_arxiv(
+    query: str,
+    output_directory: Path,
+    console: Console,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
     output_directory.mkdir(parents=True, exist_ok=True)
     staging_parent = output_directory / ".esbern"
     staging_parent.mkdir(exist_ok=True)
@@ -318,7 +357,9 @@ def _download_from_arxiv(query: str, output_directory: Path, console: Console,
         transient=False,
         refresh_per_second=8,
     )
-    with tempfile.TemporaryDirectory(prefix="get-arxiv-", dir=staging_parent) as temp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix="get-arxiv-", dir=staging_parent
+    ) as temp_dir:
         with progress:
             task_id = progress.add_task("Searching arXiv…", total=None, detail="")
 
@@ -339,23 +380,31 @@ def _download_from_arxiv(query: str, output_directory: Path, console: Console,
                 destination = _unique_destination(output_directory / result.path.name)
                 result.path.replace(destination)
         except OSError as error:
-            raise ArxivDownloadError(f"could not save the arXiv download: {error}") from error
+            raise ArxivDownloadError(
+                f"could not save the arXiv download: {error}"
+            ) from error
     return destination.resolve()
 
 
-def download_book(query: str, output_directory: Path, *,
-                  formats: Sequence[str] = SUPPORTED_FORMATS,
-                  console: Console | None = None,
-                  executable: str | None = None,
-                  source: str = "libgen",
-                  progress_callback: ProgressCallback | None = None,
-                  google_books_api_key: str | None = None,
-                  enrich_metadata: bool = True) -> DownloadedBook:
+def download_book(
+    query: str,
+    output_directory: Path,
+    *,
+    formats: Sequence[str] = SUPPORTED_FORMATS,
+    console: Console | None = None,
+    executable: str | None = None,
+    source: str = "libgen",
+    progress_callback: ProgressCallback | None = None,
+    google_books_api_key: str | None = None,
+    enrich_metadata: bool = True,
+) -> DownloadedBook:
     """Download one query using automatic LibGen/arXiv fallback."""
     query = query.strip()
     if len(query) < 3:
         raise BookDownloadError("Search terms must be at least 3 characters long.")
-    if not formats or any(book_format not in SUPPORTED_FORMATS for book_format in formats):
+    if not formats or any(
+        book_format not in SUPPORTED_FORMATS for book_format in formats
+    ):
         raise ValueError("formats must contain epub and/or pdf")
     if source not in SUPPORTED_SOURCES:
         raise ValueError(f"source must be one of: {', '.join(SUPPORTED_SOURCES)}")
@@ -375,9 +424,7 @@ def download_book(query: str, output_directory: Path, *,
             path = _download_from_arxiv(
                 query, destination, progress_console, progress_callback
             )
-            return DownloadedBook(
-                query=query, path=path, format="pdf", source="arxiv"
-            )
+            return DownloadedBook(query=query, path=path, format="pdf", source="arxiv")
         except ArxivDownloadError as error:
             errors.append(f"arXiv: {error}")
             return None
@@ -392,23 +439,23 @@ def download_book(query: str, output_directory: Path, *,
     if source in {"auto", "libgen"}:
         resolved_executable = executable or shutil.which("libgen-downloader")
         if not resolved_executable:
-            errors.append(
-                "LibGen: libgen-downloader was not found on PATH"
-            )
+            errors.append("LibGen: libgen-downloader was not found on PATH")
         else:
             for index, book_format in enumerate(formats):
                 attempt = _run_attempt(
-                    resolved_executable, query, book_format, destination,
-                    progress_console, progress_callback,
+                    resolved_executable,
+                    query,
+                    book_format,
+                    destination,
+                    progress_console,
+                    progress_callback,
                 )
                 if attempt.returncode == 0 and attempt.path is not None:
                     path = attempt.path
                     metadata = None
                     if enrich_metadata:
                         if progress_callback:
-                            progress_callback(
-                                "Looking up Google Books metadata…", path.name
-                            )
+                            progress_callback("Resolving book metadata…", path.name)
                         try:
                             path, metadata = normalize_download(
                                 path,
@@ -421,7 +468,15 @@ def download_book(query: str, output_directory: Path, *,
                                 f"normalize its metadata: {error}"
                             ) from error
                         if progress_callback:
-                            progress_callback("Metadata saved", path.name)
+                            if metadata.google_id:
+                                progress_callback(
+                                    "Google Books metadata saved", path.name
+                                )
+                            else:
+                                progress_callback(
+                                    "Google Books unavailable; LibGen metadata cleaned",
+                                    path.name,
+                                )
                     return DownloadedBook(
                         query=query,
                         path=path,

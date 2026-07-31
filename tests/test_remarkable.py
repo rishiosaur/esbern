@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,45 @@ class _WorkingSftp:
     def stat(self, path: str):
         self.calls += 1
         return SimpleNamespace(st_mtime=12.0, st_size=34)
+
+
+class _AtomicUploadSftp:
+    def __init__(self) -> None:
+        self.files = {"book.epub": b"original"}
+        self.events: list[tuple[str, str]] = []
+
+    class _File(io.BytesIO):
+        def __init__(self, owner, path: str, initial: bytes):
+            super().__init__(initial)
+            self.owner = owner
+            self.path = path
+
+        def set_pipelined(self, value: bool) -> None:
+            pass
+
+        def close(self) -> None:
+            if not self.closed:
+                self.owner.files[self.path] = self.getvalue()
+                self.owner.events.append(("write", self.path))
+            super().close()
+
+    def stat(self, path: str):
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        return SimpleNamespace(st_size=len(self.files[path]))
+
+    def file(self, path: str, mode: str):
+        initial = self.files.get(path, b"") if "r+" in mode else b""
+        return self._File(self, path, initial)
+
+    def posix_rename(self, source: str, destination: str) -> None:
+        self.files[destination] = self.files.pop(source)
+        self.events.append(("rename", destination))
+
+    def remove(self, path: str) -> None:
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        self.files.pop(path)
 
 
 class _HostKey:
@@ -72,7 +112,7 @@ def test_sftp_operation_reconnects_once_after_timeout(monkeypatch) -> None:
     assert reconnects == 1
 
 
-def test_sftp_operation_stops_after_one_retry(monkeypatch) -> None:
+def test_sftp_operation_stops_after_bounded_retries(monkeypatch) -> None:
     rm = Remarkable(Config())
     stalled = _StalledSftp()
     rm._sftp = stalled
@@ -87,8 +127,28 @@ def test_sftp_operation_stops_after_one_retry(monkeypatch) -> None:
     with pytest.raises(TimeoutError, match="stalled channel"):
         rm.stat_size("book.epub")
 
-    assert stalled.calls == 2
-    assert reconnects == 1
+    assert stalled.calls == 5
+    assert reconnects == 4
+
+
+def test_file_upload_replaces_payload_only_after_atomic_temporary_upload(
+    tmp_path, monkeypatch
+) -> None:
+    local = tmp_path / "book.epub"
+    local.write_bytes(b"normalized")
+    rm = Remarkable(Config())
+    sftp = _AtomicUploadSftp()
+    sftp.files["book.epub.esbern-token.upload"] = b"norm"
+    rm._sftp = sftp
+    monkeypatch.setattr("esbern.remarkable.secrets.token_hex", lambda length: "token")
+
+    rm.put_file(local, "book.epub")
+
+    assert sftp.files == {"book.epub": b"normalized"}
+    assert sftp.events == [
+        ("write", "book.epub.esbern-token.upload"),
+        ("rename", "book.epub"),
+    ]
 
 
 def test_bulk_metadata_stream_is_parsed_without_sftp_round_trips(monkeypatch) -> None:
