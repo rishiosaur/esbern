@@ -5,5 +5,10 @@ esbern.rishi.cx {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 	}
-	reverse_proxy 127.0.0.1:8037
+	handle_path /__ESBERN_MCP_PATH__/* {
+		reverse_proxy 127.0.0.1:8038
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8037
+	}
 }

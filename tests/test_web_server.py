@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from unittest.mock import patch
 from zipfile import ZipFile
 
@@ -9,7 +10,13 @@ from fastapi.testclient import TestClient
 
 from esbern.cli import main
 from esbern.downloader import DownloadedBook
-from esbern.server_library import _sync_roots, catalog, cover, install_books
+from esbern.server_library import (
+    _sync_roots,
+    catalog,
+    cover,
+    install_books,
+    search_catalog,
+)
 from esbern.web_server import create_app
 
 
@@ -98,6 +105,97 @@ def test_catalog_and_cover_routes(tmp_path) -> None:
     assert image.status_code == 200
     assert image.headers["content-type"] == "image/svg+xml"
     assert image.headers["x-content-type-options"] == "nosniff"
+
+
+def test_search_catalog_matches_words_across_title_and_author(tmp_path) -> None:
+    (tmp_path / "Ursula K. Le Guin - The Dispossessed (1974).epub").write_bytes(b"book")
+    (tmp_path / "Octavia Butler - Kindred (1979).epub").write_bytes(b"book")
+
+    result = search_catalog(tmp_path, "ursula dispossessed")
+
+    assert result["count"] == 1
+    assert result["returned"] == 1
+    assert result["books"][0]["title"] == "The Dispossessed"
+
+
+def test_search_api_and_full_catalog_api(tmp_path) -> None:
+    (tmp_path / "Ursula K. Le Guin - The Dispossessed (1974).epub").write_bytes(b"book")
+    (tmp_path / "Octavia Butler - Kindred (1979).epub").write_bytes(b"book")
+    client = TestClient(create_app(tmp_path))
+
+    full_catalog = client.get("/api/books")
+    search = client.get("/api/books/search", params={"q": "Octavia Kindred"})
+
+    assert full_catalog.status_code == 200
+    assert full_catalog.json()["count"] == 2
+    assert search.status_code == 200
+    assert search.json()["count"] == 1
+    assert search.json()["books"][0]["title"] == "Kindred"
+
+
+def test_chatgpt_action_schema_exposes_read_and_queued_write_tools(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path))
+
+    response = client.get("/integrations/chatgpt/openapi.json")
+
+    assert response.status_code == 200
+    schema = response.json()
+    assert schema["paths"]["/api/books"]["get"]["operationId"] == "listLibrary"
+    assert schema["paths"]["/api/books/search"]["get"]["operationId"] == "searchLibrary"
+    queue = schema["paths"]["/api/jobs/books"]["post"]
+    assert queue["operationId"] == "queueBook"
+    assert queue["x-openai-isConsequential"] is True
+    assert queue["security"] == [{"BearerAuth": []}]
+
+
+@patch("esbern.server_jobs.install_books")
+def test_phone_client_can_queue_and_poll_an_authenticated_book_job(
+    install, tmp_path
+) -> None:
+    install.return_value = {
+        "downloaded": [{"query": "A Book"}],
+        "skipped": [],
+        "failed": [],
+        "sync": {"ok": True},
+        "catalog": {"count": 3, "books": []},
+    }
+    headers = {"Authorization": "Bearer secret-token"}
+
+    with (
+        patch.dict(os.environ, {"ESBERN_API_TOKEN": "secret-token"}),
+        TestClient(create_app(tmp_path)) as client,
+    ):
+        unauthorized = client.post("/api/jobs/books", json={"query": "A Book"})
+        queued = client.post(
+            "/api/jobs/books", json={"query": "A Book"}, headers=headers
+        )
+        job_id = queued.json()["id"]
+        deadline = time.monotonic() + 2
+        while True:
+            current = client.get(f"/api/jobs/{job_id}", headers=headers)
+            if current.json()["status"] in {"succeeded", "failed"}:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+    assert unauthorized.status_code == 401
+    assert queued.status_code == 202
+    assert queued.headers["location"] == f"/api/jobs/{job_id}"
+    assert current.status_code == 200
+    assert current.json()["status"] == "succeeded"
+    assert current.json()["result"]["catalog_count"] == 3
+    assert "catalog" not in current.json()["result"]
+    assert install.call_args.args[1]["queries"] == ["A Book"]
+
+
+def test_job_status_rejects_invalid_or_missing_ids(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path))
+
+    invalid = client.get("/api/jobs/not-a-job")
+    missing = client.get("/api/jobs/0123456789abcdef0123456789abcdef")
+
+    assert invalid.status_code == 400
+    assert missing.status_code == 404
 
 
 @patch("esbern.web_server.install_books")

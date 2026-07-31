@@ -5,22 +5,33 @@ from __future__ import annotations
 import html
 import os
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from esbern import __version__
+from esbern.server_jobs import JobStore
 from esbern.server_library import (
     ServerInputError,
     catalog,
     cover,
     install_books,
+    search_catalog,
     synchronize,
 )
 
@@ -90,7 +101,7 @@ def _grid_html(library: str, books: list[dict[str, object]]) -> str:
     }}
   </style>
 </head>
-<body><main aria-label="{escaped_library} library">{''.join(images)}</main></body>
+<body><main aria-label="{escaped_library} library">{"".join(images)}</main></body>
 </html>"""
 
 
@@ -99,10 +110,18 @@ def create_app(library_root: Path) -> FastAPI:
     if not root.is_dir():
         raise ValueError(f"Library path is not a directory: {root}")
 
+    jobs = JobStore(root)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        jobs.close()
+
     app = FastAPI(
         title="Esbern",
         description="Download books into a server-side library and sync it with reMarkable.",
         version=__version__,
+        lifespan=lifespan,
     )
     cors_origin = os.environ.get("ESBERN_CORS_ORIGIN", "*").strip() or "*"
     app.add_middleware(
@@ -123,7 +142,9 @@ def create_app(library_root: Path) -> FastAPI:
         if authorization and authorization.startswith("Bearer "):
             supplied = authorization.removeprefix("Bearer ")
         if not secrets.compare_digest(supplied, token):
-            raise HTTPException(status_code=401, detail="Invalid or missing bearer token.")
+            raise HTTPException(
+                status_code=401, detail="Invalid or missing bearer token."
+            )
 
     @app.exception_handler(ServerInputError)
     async def server_input_error(_: Request, error: ServerInputError) -> JSONResponse:
@@ -154,8 +175,11 @@ def create_app(library_root: Path) -> FastAPI:
             "docs": "/docs",
             "endpoints": {
                 "catalog": "GET /api/books",
+                "search": "GET /api/books/search?q=...",
                 "install": "POST /api/books",
                 "bulk_install": "POST text/plain to /api/books/bulk",
+                "queue_install": "POST /api/jobs/books",
+                "job_status": "GET /api/jobs/{job_id}",
                 "sync": "POST /api/sync",
             },
         }
@@ -169,17 +193,65 @@ def create_app(library_root: Path) -> FastAPI:
         response.headers["Cache-Control"] = "no-store"
         return catalog(root)
 
+    @app.get("/api/books/search", tags=["books"])
+    def search_books(
+        response: Response,
+        q: Annotated[str, Query(min_length=1, max_length=500)],
+        limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    ) -> dict[str, object]:
+        response.headers["Cache-Control"] = "no-store"
+        return search_catalog(root, q, limit=limit)
+
+    @app.get(
+        "/integrations/chatgpt/openapi.json",
+        tags=["integrations"],
+        include_in_schema=False,
+    )
+    def chatgpt_schema() -> dict[str, object]:
+        return _chatgpt_action_schema()
+
     @app.post(
         "/api/books",
         tags=["books"],
         dependencies=[Depends(authorize)],
     )
-    def install_book(request: InstallBookRequest, response: Response) -> dict[str, object]:
+    def install_book(
+        request: InstallBookRequest, response: Response
+    ) -> dict[str, object]:
         payload = request.model_dump()
         payload["queries"] = [payload.pop("query")]
         result = install_books(root, payload)
         response.status_code = _mutation_status(result, bulk=False)
         return result
+
+    @app.post(
+        "/api/jobs/books",
+        status_code=202,
+        tags=["jobs"],
+        dependencies=[Depends(authorize)],
+    )
+    def queue_book(
+        request: InstallBookRequest,
+        response: Response,
+    ) -> dict[str, object]:
+        payload = request.model_dump()
+        payload["queries"] = [payload.pop("query")]
+        record = jobs.enqueue_book(payload)
+        response.headers["Location"] = f"/api/jobs/{record['id']}"
+        return record
+
+    @app.get(
+        "/api/jobs/{job_id}",
+        tags=["jobs"],
+        dependencies=[Depends(authorize)],
+    )
+    def get_job(job_id: str) -> dict[str, object]:
+        try:
+            return jobs.get(job_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="Job not found.") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.post(
         "/api/books/bulk",
@@ -199,7 +271,9 @@ def create_app(library_root: Path) -> FastAPI:
         try:
             text = body.decode("utf-8-sig")
         except UnicodeDecodeError as error:
-            raise HTTPException(status_code=400, detail="Bulk text must be UTF-8.") from error
+            raise HTTPException(
+                status_code=400, detail="Bulk text must be UTF-8."
+            ) from error
         queries = [line.strip() for line in text.splitlines() if line.strip()]
         result = await run_in_threadpool(
             install_books,
@@ -255,6 +329,157 @@ def create_app(library_root: Path) -> FastAPI:
     return app
 
 
+def _chatgpt_action_schema() -> dict[str, object]:
+    book_response = {"type": "object", "additionalProperties": True}
+    return {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Esbern Library",
+            "description": (
+                "Search the owner's book library and queue new books for download "
+                "and reMarkable synchronization. Search before adding a book."
+            ),
+            "version": __version__,
+        },
+        "servers": [{"url": "https://esbern.rishi.cx"}],
+        "paths": {
+            "/api/books": {
+                "get": {
+                    "operationId": "listLibrary",
+                    "summary": "Get the full library",
+                    "description": "Return every PDF and EPUB in the library.",
+                    "responses": {
+                        "200": {
+                            "description": "Full catalog",
+                            "content": {"application/json": {"schema": book_response}},
+                        }
+                    },
+                }
+            },
+            "/api/books/search": {
+                "get": {
+                    "operationId": "searchLibrary",
+                    "summary": "Search the library",
+                    "description": "Search title, author, year, folder, path, and format. Use this before queueing a book.",
+                    "parameters": [
+                        {
+                            "name": "q",
+                            "in": "query",
+                            "required": True,
+                            "schema": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                            },
+                        },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": False,
+                            "schema": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 500,
+                                "default": 20,
+                            },
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Ranked matching books",
+                            "content": {"application/json": {"schema": book_response}},
+                        }
+                    },
+                }
+            },
+            "/api/jobs/books": {
+                "post": {
+                    "operationId": "queueBook",
+                    "summary": "Queue a book for installation",
+                    "description": "Queue one book for download into Books and automatic reMarkable synchronization. Return immediately with a job id.",
+                    "security": [{"BearerAuth": []}],
+                    "x-openai-isConsequential": True,
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["query"],
+                                    "properties": {
+                                        "query": {
+                                            "type": "string",
+                                            "minLength": 3,
+                                            "maxLength": 500,
+                                        },
+                                        "format": {
+                                            "type": "string",
+                                            "enum": ["auto", "epub", "pdf"],
+                                            "default": "auto",
+                                        },
+                                        "source": {
+                                            "type": "string",
+                                            "enum": ["auto", "libgen", "arxiv"],
+                                            "default": "libgen",
+                                        },
+                                        "metadata": {
+                                            "type": "boolean",
+                                            "default": True,
+                                        },
+                                        "jobs": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "maximum": 32,
+                                            "default": 1,
+                                        },
+                                        "sync_workers": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "maximum": 8,
+                                            "default": 4,
+                                        },
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "202": {
+                            "description": "Queued job",
+                            "content": {"application/json": {"schema": book_response}},
+                        }
+                    },
+                }
+            },
+            "/api/jobs/{job_id}": {
+                "get": {
+                    "operationId": "getBookJob",
+                    "summary": "Check an installation job",
+                    "description": "Return queued, running, succeeded, or failed state and the final result.",
+                    "security": [{"BearerAuth": []}],
+                    "parameters": [
+                        {
+                            "name": "job_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Current job state",
+                            "content": {"application/json": {"schema": book_response}},
+                        }
+                    },
+                }
+            },
+        },
+        "components": {
+            "securitySchemes": {"BearerAuth": {"type": "http", "scheme": "bearer"}}
+        },
+    }
+
+
 def _integer_query(request: Request, name: str, default: int) -> int:
     raw = request.query_params.get(name)
     if raw is None:
@@ -262,7 +487,9 @@ def _integer_query(request: Request, name: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=f"{name} must be an integer.") from error
+        raise HTTPException(
+            status_code=400, detail=f"{name} must be an integer."
+        ) from error
 
 
 def serve_web(library_root: Path, *, hostname: str, port: int) -> None:

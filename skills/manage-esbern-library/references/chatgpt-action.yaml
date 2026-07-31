@@ -1,0 +1,87 @@
+openapi: 3.1.0
+info:
+  title: Esbern Library
+  description: Search the owner's library and queue books for download and reMarkable synchronization. Search before adding a book.
+  version: 0.1.0
+servers:
+  - url: https://esbern.rishi.cx
+paths:
+  /api/books:
+    get:
+      operationId: listLibrary
+      summary: Get the full library
+      responses:
+        '200':
+          description: Full catalog
+  /api/books/search:
+    get:
+      operationId: searchLibrary
+      summary: Search the library
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 20
+      responses:
+        '200':
+          description: Ranked matching books
+  /api/jobs/books:
+    post:
+      operationId: queueBook
+      summary: Queue a book for installation
+      description: Queue one book for download and automatic reMarkable synchronization. Returns immediately with a job ID.
+      security:
+        - BearerAuth: []
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                  minLength: 3
+                  maxLength: 500
+                format:
+                  type: string
+                  enum: [auto, epub, pdf]
+                  default: auto
+                source:
+                  type: string
+                  enum: [auto, libgen, arxiv]
+                  default: libgen
+      responses:
+        '202':
+          description: Queued job
+  /api/jobs/{job_id}:
+    get:
+      operationId: getBookJob
+      summary: Check an installation job
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current job state
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer

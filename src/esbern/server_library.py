@@ -9,6 +9,7 @@ import io
 import os
 import re
 import textwrap
+import unicodedata
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -109,9 +110,7 @@ def _filename_metadata(path: Path) -> tuple[str, tuple[str, ...], str]:
     if match is None:
         return path.stem, (), ""
     authors = tuple(
-        author.strip()
-        for author in match.group("authors").split(",")
-        if author.strip()
+        author.strip() for author in match.group("authors").split(",") if author.strip()
     )
     return match.group("title"), authors, match.group("year")
 
@@ -159,6 +158,70 @@ def catalog(root: Path) -> dict[str, object]:
         "library": root.name,
         "count": len(books),
         "books": [asdict(book) for book in books],
+    }
+
+
+def _search_text(value: object) -> str:
+    text = unicodedata.normalize("NFKD", str(value).casefold())
+    return " ".join(
+        "".join(char for char in text if not unicodedata.combining(char)).split()
+    )
+
+
+def search_catalog(root: Path, query: str, *, limit: int = 50) -> dict[str, object]:
+    needle = _search_text(query)
+    if not needle:
+        raise ServerInputError("Search query must not be empty.")
+    if not 1 <= limit <= 500:
+        raise ServerInputError("Search limit must be between 1 and 500.")
+
+    terms = needle.split()
+    result = catalog(root)
+    books = result["books"]
+    assert isinstance(books, list)
+    matches: list[tuple[int, dict[str, object]]] = []
+    for book in books:
+        title = _search_text(book["title"])
+        authors = _search_text(" ".join(book["authors"]))
+        searchable = _search_text(
+            " ".join(
+                (
+                    str(book["title"]),
+                    " ".join(book["authors"]),
+                    str(book["year"]),
+                    str(book["folder"]),
+                    str(book["relpath"]),
+                    str(book["format"]),
+                )
+            )
+        )
+        if not all(term in searchable for term in terms):
+            continue
+        score = sum(searchable.count(term) for term in terms)
+        if needle == title:
+            score += 1_000
+        elif title.startswith(needle):
+            score += 500
+        elif needle in title:
+            score += 250
+        if needle in authors:
+            score += 100
+        matches.append((score, book))
+
+    matches.sort(
+        key=lambda item: (
+            -item[0],
+            str(item[1]["title"]).casefold(),
+            str(item[1]["relpath"]).casefold(),
+        )
+    )
+    selected = [book for _score, book in matches[:limit]]
+    return {
+        "library": result["library"],
+        "query": query,
+        "count": len(matches),
+        "returned": len(selected),
+        "books": selected,
     }
 
 
@@ -352,7 +415,9 @@ def _download_root(root: Path) -> Path:
         destination = destination.resolve()
         if destination != root and root not in destination.parents:
             raise ServerInputError("ESBERN_INBOX_DIR must be inside the library root.")
-        if not any(scope == destination or scope in destination.parents for scope in scopes):
+        if not any(
+            scope == destination or scope in destination.parents for scope in scopes
+        ):
             raise ServerInputError(
                 "ESBERN_INBOX_DIR must be inside an existing synchronized folder."
             )
@@ -535,7 +600,9 @@ def _download_many(
                 index, query = futures[future]
                 try:
                     completed_index, result = future.result()
-                    downloaded_by_index[completed_index] = _download_result(result, root)
+                    downloaded_by_index[completed_index] = _download_result(
+                        result, root
+                    )
                 except Exception as error:  # noqa: BLE001 - isolate each bulk item
                     failed_by_index[index] = {"query": query, "error": str(error)}
 

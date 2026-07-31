@@ -1,0 +1,33 @@
+[Unit]
+Description=Esbern Claude MCP connector
+After=network-online.target esbern.service
+Wants=network-online.target
+Requires=esbern.service
+
+[Service]
+Type=simple
+User=esbern
+Group=esbern
+WorkingDirectory=/opt/esbern
+Environment=HOME=/var/lib/esbern
+Environment=ESBERN_INTERNAL_API_URL=http://127.0.0.1:8037
+Environment=PYTHONUNBUFFERED=1
+LoadCredential=api-token:/etc/esbern/api-token
+ExecStart=/opt/esbern/deploy/run-mcp.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

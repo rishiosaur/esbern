@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Esbern Library"
+  short_description: "Search and add books to Esbern"
+  default_prompt: "Use $manage-esbern-library to search my library and add a book if it is missing."

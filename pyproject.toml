@@ -19,10 +19,12 @@ dependencies = [
     "rich>=13.7",
     "fastapi>=0.141.1",
     "uvicorn>=0.52.0",
+    "mcp>=2.0.0",
 ]
 
 [project.scripts]
 esbern = "esbern.cli:main"
+esbern-mcp = "esbern.mcp_server:main"
 
 [dependency-groups]
 dev = [

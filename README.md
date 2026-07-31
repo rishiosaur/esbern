@@ -125,6 +125,16 @@ relative folder name to choose a different inbox:
 # Catalog
 curl http://server:3000/api/books
 
+# Search title, author, year, folder, path, or format
+curl --get http://server:3000/api/books/search \
+  --data-urlencode 'q=ursula le guin dispossessed'
+
+# Queue one book for phone/assistant clients and poll the returned job URL
+curl -X POST http://server:3000/api/jobs/books \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"The Left Hand of Darkness Ursula Le Guin"}'
+
 # One book
 curl -X POST http://server:3000/api/books \
   -H 'Content-Type: application/json' \
@@ -146,6 +156,12 @@ send `Authorization: Bearer <token>` with download and sync requests. Set
 `ESBERN_CORS_ORIGIN` to restrict cross-origin browser clients; it defaults to
 `*`. Put the server behind a reverse proxy if it is exposed beyond a trusted
 Tailscale network.
+
+Phone-friendly ChatGPT and Claude setup lives in
+[`skills/manage-esbern-library`](skills/manage-esbern-library). ChatGPT uses
+the hosted OpenAPI action schema; Claude uses the hosted MCP connector. Both
+can list and search the public catalog, queue authenticated background book
+installs, and check job status without holding a download request open.
 
 Uploads use four parallel SSH workers by default. Each worker independently
 classifies and transfers a book, while completed books are checkpointed one at
