@@ -31,6 +31,7 @@ from esbern.downloader import (
     SUPPORTED_FORMATS,
     SUPPORTED_SOURCES,
     DownloadedBook,
+    ProgressCallback,
     download_book,
     find_existing_book,
 )
@@ -437,15 +438,34 @@ def _download_root(root: Path) -> Path:
     )
 
 
-def _event_reporter(events: list[dict[str, object]]):
+def _event_reporter(
+    events: list[dict[str, object]],
+    progress_callback: ProgressCallback | None = None,
+    *,
+    library: str = ".",
+):
     def report(event: SyncEvent) -> None:
         if len(events) < 1_000:
             events.append(asdict(event))
+        if progress_callback is None:
+            return
+        detail = event.action
+        if event.item:
+            detail = f"{detail}: {event.item}"
+        if event.current is not None and event.total is not None:
+            detail = f"{detail} · {event.current}/{event.total}"
+        scope = "" if library == "." else f" ({library})"
+        progress_callback(f"reMarkable sync{scope}: {event.phase}", detail)
 
     return report
 
 
-def _sync(root: Path, *, workers: int) -> dict[str, object]:
+def _sync(
+    root: Path,
+    *,
+    workers: int,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, object]:
     if not 1 <= workers <= 8:
         raise ServerInputError("Sync workers must be between 1 and 8.")
     cfg = config.load()
@@ -453,12 +473,22 @@ def _sync(root: Path, *, workers: int) -> dict[str, object]:
     totals: dict[str, int] = {}
     for sync_root in _sync_roots(root):
         events: list[dict[str, object]] = []
+        library = sync_root.relative_to(root).as_posix() if sync_root != root else "."
+        if progress_callback:
+            progress_callback(
+                "Connecting to reMarkable",
+                None if library == "." else library,
+            )
         with connected(cfg) as remarkable:
             stats = run_sync(
                 remarkable,
                 sync_root,
                 restart=cfg.restart_xochitl,
-                reporter=_event_reporter(events),
+                reporter=_event_reporter(
+                    events,
+                    progress_callback,
+                    library=library,
+                ),
                 workers=workers,
             )
         stats_payload = asdict(stats)
@@ -466,12 +496,24 @@ def _sync(root: Path, *, workers: int) -> dict[str, object]:
             totals[name] = totals.get(name, 0) + value
         libraries.append(
             {
-                "library": sync_root.relative_to(root).as_posix()
-                if sync_root != root
-                else ".",
+                "library": library,
                 "stats": stats_payload,
                 "events": events,
             }
+        )
+    if progress_callback:
+        changes = sum(
+            totals.get(name, 0)
+            for name in (
+                "files_uploaded",
+                "files_updated",
+                "files_pulled",
+                "files_repulled",
+            )
+        )
+        progress_callback(
+            "reMarkable sync complete",
+            f"{changes} file change{'s' if changes != 1 else ''}",
         )
     return {
         "ok": True,
@@ -538,6 +580,7 @@ def _download_many(
     metadata: bool,
     jobs: int,
     sync_workers: int,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, object]:
     if format_ not in {"auto", *SUPPORTED_FORMATS}:
         raise ServerInputError("Format must be auto, epub, or pdf.")
@@ -555,21 +598,31 @@ def _download_many(
     pending: list[tuple[int, str]] = []
     skipped: list[dict[str, object]] = []
     seen: set[str] = set()
+    if progress_callback:
+        progress_callback(
+            "Checking the library for existing books",
+            f"{len(queries)} {'query' if len(queries) == 1 else 'queries'}",
+        )
     for index, query in enumerate(queries):
         key = " ".join(query.casefold().split())
         if key in seen:
             skipped.append({"query": query, "reason": "duplicate query"})
+            if progress_callback:
+                progress_callback("Skipped duplicate query", query)
             continue
         seen.add(key)
         existing = _find_existing_in_library(query, root)
         if existing:
+            relpath = existing.relative_to(root).as_posix()
             skipped.append(
                 {
                     "query": query,
                     "reason": "already exists",
-                    "relpath": existing.relative_to(root).as_posix(),
+                    "relpath": relpath,
                 }
             )
+            if progress_callback:
+                progress_callback("Already in the library", f"{query}: {relpath}")
             continue
         pending.append((index, query))
 
@@ -579,6 +632,18 @@ def _download_many(
 
     def download_one(index: int, query: str) -> tuple[int, DownloadedBook]:
         console = Console(file=io.StringIO(), force_terminal=False, color_system=None)
+
+        def report(status: str | None, detail: str | None) -> None:
+            if progress_callback is None:
+                return
+            labeled_status = (
+                f"Downloading {query}: {status}" if status else f"Downloading {query}"
+            )
+            labeled_detail = f"{query}: {detail}" if detail else None
+            progress_callback(labeled_status, labeled_detail)
+
+        if progress_callback:
+            progress_callback("Starting download", query)
         result = download_book(
             query,
             destination,
@@ -587,6 +652,7 @@ def _download_many(
             source=source,
             google_books_api_key=books_key,
             enrich_metadata=metadata,
+            progress_callback=report if progress_callback else None,
         )
         return index, result
 
@@ -603,21 +669,47 @@ def _download_many(
                     downloaded_by_index[completed_index] = _download_result(
                         result, root
                     )
+                    if progress_callback:
+                        progress_callback(
+                            "Download installed",
+                            result.path.relative_to(root).as_posix(),
+                        )
                 except Exception as error:  # noqa: BLE001 - isolate each bulk item
                     failed_by_index[index] = {"query": query, "error": str(error)}
+                    if progress_callback:
+                        progress_callback("Download failed", f"{query}: {error}")
 
     downloaded = [downloaded_by_index[index] for index in sorted(downloaded_by_index)]
     failed = [failed_by_index[index] for index in sorted(failed_by_index)]
     sync_result: dict[str, object] | None = None
     if downloaded or skipped:
         try:
-            sync_result = _sync(root, workers=sync_workers)
+            if progress_callback:
+                progress_callback(
+                    "Starting reMarkable sync",
+                    f"{len(downloaded)} downloaded, {len(skipped)} already present",
+                )
+            if progress_callback:
+                sync_result = _sync(
+                    root,
+                    workers=sync_workers,
+                    progress_callback=progress_callback,
+                )
+            else:
+                sync_result = _sync(root, workers=sync_workers)
         except Exception as error:  # noqa: BLE001 - downloads remain installed locally
             sync_result = {
                 "ok": False,
                 "error": str(error),
                 "error_type": type(error).__name__,
             }
+            if progress_callback:
+                progress_callback("reMarkable sync failed", str(error))
+    if progress_callback:
+        progress_callback(
+            "Refreshing the library catalog",
+            f"{len(downloaded)} downloaded, {len(skipped)} skipped, {len(failed)} failed",
+        )
     return {
         "downloaded": downloaded,
         "skipped": skipped,
@@ -627,7 +719,12 @@ def _download_many(
     }
 
 
-def install_books(root: Path, payload: dict[str, object]) -> dict[str, object]:
+def install_books(
+    root: Path,
+    payload: dict[str, object],
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, object]:
     queries = _query_list(payload.get("queries"))
     format_ = str(payload.get("format", "auto")).casefold()
     source = str(payload.get("source", "libgen")).casefold()
@@ -649,4 +746,5 @@ def install_books(root: Path, payload: dict[str, object]) -> dict[str, object]:
             metadata=metadata,
             jobs=jobs,
             sync_workers=sync_workers,
+            progress_callback=progress_callback,
         )

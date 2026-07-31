@@ -161,7 +161,10 @@ Phone-friendly ChatGPT and Claude setup lives in
 [`skills/manage-esbern-library`](skills/manage-esbern-library). ChatGPT uses
 the hosted OpenAPI action schema; Claude uses the hosted MCP connector. Both
 can list and search the public catalog, queue authenticated background book
-installs, and check job status without holding a download request open.
+installs, and check job status. Claude's `add_book` tool keeps its MCP request
+open and streams the persisted download, metadata, and reMarkable sync stages;
+the underlying job continues if the request is interrupted. ChatGPT queues the
+same durable job and polls its status separately.
 
 Uploads use four parallel SSH workers by default. Each worker independently
 classifies and transfers a book, while completed books are checkpointed one at

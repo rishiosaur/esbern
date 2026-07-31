@@ -6,12 +6,16 @@ import json
 import os
 import tempfile
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
 from esbern.server_library import install_books
+
+_MAX_PROGRESS_EVENTS = 200
+_MIN_PROGRESS_INTERVAL = 0.25
 
 
 def _now() -> str:
@@ -44,6 +48,20 @@ class JobStore:
             "request": payload,
             "result": None,
             "error": None,
+            "progress": {
+                "sequence": 0,
+                "message": "Queued",
+                "detail": None,
+                "updated_at": now,
+            },
+            "progress_events": [
+                {
+                    "sequence": 0,
+                    "message": "Queued",
+                    "detail": None,
+                    "updated_at": now,
+                }
+            ],
         }
         self._save(record)
         self._executor.submit(self._run_book, job_id, payload)
@@ -63,22 +81,83 @@ class JobStore:
 
     def _run_book(self, job_id: str, payload: dict[str, object]) -> None:
         record = self.get(job_id)
+        progress_lock = threading.Lock()
+        last_saved_at = 0.0
+
+        def report_progress(
+            message: str | None,
+            detail: str | None,
+            *,
+            force: bool = False,
+        ) -> None:
+            nonlocal last_saved_at
+            with progress_lock:
+                previous = record.get("progress")
+                if not isinstance(previous, dict):
+                    previous = {
+                        "sequence": -1,
+                        "message": "Working",
+                        "detail": None,
+                    }
+                effective_message = message or str(previous.get("message") or "Working")
+                previous_detail = previous.get("detail")
+                if (
+                    effective_message == previous.get("message")
+                    and detail == previous_detail
+                ):
+                    return
+
+                monotonic_now = time.monotonic()
+                phase_changed = (
+                    message is not None and effective_message != previous.get("message")
+                )
+                if (
+                    not force
+                    and not phase_changed
+                    and monotonic_now - last_saved_at < _MIN_PROGRESS_INTERVAL
+                ):
+                    return
+
+                now = _now()
+                progress = {
+                    "sequence": int(previous.get("sequence", -1)) + 1,
+                    "message": effective_message,
+                    "detail": detail,
+                    "updated_at": now,
+                }
+                events = record.get("progress_events")
+                if not isinstance(events, list):
+                    events = []
+                events.append(progress.copy())
+                record["progress_events"] = events[-_MAX_PROGRESS_EVENTS:]
+                record["progress"] = progress
+                record["updated_at"] = now
+                self._save(record)
+                last_saved_at = monotonic_now
+
         record["status"] = "running"
         record["updated_at"] = _now()
         self._save(record)
+        report_progress("Starting book installation", None, force=True)
         try:
-            result = install_books(self.library_root, payload)
+            result = install_books(
+                self.library_root,
+                payload,
+                progress_callback=report_progress,
+            )
             catalog_result = result.pop("catalog", None)
             if isinstance(catalog_result, dict):
                 result["catalog_count"] = catalog_result.get("count")
             record["status"] = "succeeded"
             record["result"] = result
+            report_progress("Book installation finished", None, force=True)
         except Exception as error:  # noqa: BLE001 - persist background failures
             record["status"] = "failed"
             record["error"] = {
                 "type": type(error).__name__,
                 "message": str(error),
             }
+            report_progress("Book installation failed", str(error), force=True)
         record["updated_at"] = _now()
         self._save(record)
 
@@ -118,4 +197,20 @@ class JobStore:
                 "type": "InterruptedError",
                 "message": "The server restarted before this job completed.",
             }
+            previous = record.get("progress")
+            sequence = (
+                int(previous.get("sequence", -1)) if isinstance(previous, dict) else -1
+            )
+            progress = {
+                "sequence": sequence + 1,
+                "message": "Book installation interrupted",
+                "detail": "The server restarted before this job completed.",
+                "updated_at": record["updated_at"],
+            }
+            record["progress"] = progress
+            events = record.get("progress_events")
+            if not isinstance(events, list):
+                events = []
+            events.append(progress.copy())
+            record["progress_events"] = events[-_MAX_PROGRESS_EVENTS:]
             self._save(record)

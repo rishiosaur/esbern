@@ -27,9 +27,13 @@ read local folders.
 - Only call `add_book` or `queueBook` after the user explicitly asks to add,
   fetch, download, or install the book. This starts an external download and a
   reMarkable sync.
-- Report the returned job ID and initial status. Use `check_book_job` or
-  `getBookJob` when the user asks for progress, or once after enqueueing when
-  the tool can be called without delaying the response.
+- In Claude, keep `add_book` open and surface its live download, metadata, and
+  reMarkable sync updates. Report its terminal result. If the stream is
+  interrupted, use the job ID from the progress messages with `check_book_job`;
+  the server-side job continues.
+- In ChatGPT, report the job ID returned by `queueBook`. Use `getBookJob` when
+  the user asks for progress, or once after enqueueing when the tool can be
+  called without delaying the response.
 
 Use `auto` format unless the user requests EPUB or PDF. Use the default source
 unless the user names arXiv or provides an arXiv identifier. Never retry a

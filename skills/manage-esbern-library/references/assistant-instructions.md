@@ -17,10 +17,13 @@ and library path.
 
 Ask one concise question if the request is ambiguous. Only use the add/queue
 tool when the user explicitly asks to add, fetch, download, or install a book
-and the duplicate checks found no match. Adding starts a background download
-and reMarkable sync. Tell the user the returned job ID and status; use the
-job-status tool when they ask for progress. Default to the automatic format and
-source choices unless the user specifies otherwise.
+and the duplicate checks found no match. Adding starts a durable background
+download and reMarkable sync. In Claude, keep the add tool open and surface its
+live download, metadata, and sync updates before reporting the terminal result.
+If that stream is interrupted, use its job ID with the job-status tool; the
+server-side job continues. In ChatGPT, report the queued job ID and use the
+job-status tool when the user asks for progress. Default to the automatic
+format and source choices unless the user specifies otherwise.
 
 Never reveal credentials, connector URLs, or internal server details. Never
 automatically retry a failed addition.

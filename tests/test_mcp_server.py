@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from esbern.mcp_server import (
     add_book,
@@ -49,12 +50,54 @@ def test_mcp_read_tools_use_public_catalog_api(request) -> None:
 @patch("esbern.mcp_server._request")
 def test_mcp_write_and_status_tools_authenticate(request) -> None:
     request.side_effect = [
-        {"id": "abc", "status": "queued"},
+        {
+            "id": "abc",
+            "status": "queued",
+            "progress_events": [{"sequence": 0, "message": "Queued", "detail": None}],
+        },
+        {
+            "id": "abc",
+            "status": "running",
+            "progress_events": [
+                {"sequence": 0, "message": "Queued", "detail": None},
+                {
+                    "sequence": 1,
+                    "message": "Starting LibGen EPUB search",
+                    "detail": "Kindred",
+                },
+            ],
+        },
+        {
+            "id": "abc",
+            "status": "succeeded",
+            "progress_events": [
+                {
+                    "sequence": 2,
+                    "message": "reMarkable sync complete",
+                    "detail": "1 file change",
+                }
+            ],
+        },
         {"id": "abc", "status": "succeeded"},
     ]
+    context = SimpleNamespace(report_progress=AsyncMock())
 
-    assert add_book("Kindred Octavia Butler", format="epub")["status"] == "queued"
+    with patch("esbern.mcp_server.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(
+            add_book(
+                "Kindred Octavia Butler",
+                context,
+                format="epub",
+            )
+        )
+
+    assert result["status"] == "succeeded"
     assert check_book_job("abc")["status"] == "succeeded"
+    progress = context.report_progress.await_args_list
+    assert [call.args[0] for call in progress] == [1.0, 2.0, 3.0]
+    assert progress[0].kwargs["message"] == "Job abc: Queued"
+    assert "Starting LibGen EPUB search" in progress[1].kwargs["message"]
+    assert "reMarkable sync complete" in progress[2].kwargs["message"]
 
     assert request.call_args_list[0].args == (
         "POST",
@@ -68,3 +111,7 @@ def test_mcp_write_and_status_tools_authenticate(request) -> None:
     assert request.call_args_list[0].kwargs == {"authenticated": True}
     assert request.call_args_list[1].args == ("GET", "/api/jobs/abc")
     assert request.call_args_list[1].kwargs == {"authenticated": True}
+    assert request.call_args_list[2].args == ("GET", "/api/jobs/abc")
+    assert request.call_args_list[2].kwargs == {"authenticated": True}
+    assert request.call_args_list[3].args == ("GET", "/api/jobs/abc")
+    assert request.call_args_list[3].kwargs == {"authenticated": True}

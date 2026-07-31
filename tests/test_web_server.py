@@ -154,13 +154,19 @@ def test_chatgpt_action_schema_exposes_read_and_queued_write_tools(tmp_path) -> 
 def test_phone_client_can_queue_and_poll_an_authenticated_book_job(
     install, tmp_path
 ) -> None:
-    install.return_value = {
-        "downloaded": [{"query": "A Book"}],
-        "skipped": [],
-        "failed": [],
-        "sync": {"ok": True},
-        "catalog": {"count": 3, "books": []},
-    }
+    def installed(_root, _payload, *, progress_callback):
+        progress_callback("Starting LibGen EPUB search", "A Book")
+        progress_callback("Metadata saved", "A Book.epub")
+        progress_callback("reMarkable sync complete", "1 file change")
+        return {
+            "downloaded": [{"query": "A Book"}],
+            "skipped": [],
+            "failed": [],
+            "sync": {"ok": True},
+            "catalog": {"count": 3, "books": []},
+        }
+
+    install.side_effect = installed
     headers = {"Authorization": "Bearer secret-token"}
 
     with (
@@ -187,7 +193,13 @@ def test_phone_client_can_queue_and_poll_an_authenticated_book_job(
     assert current.json()["status"] == "succeeded"
     assert current.json()["result"]["catalog_count"] == 3
     assert "catalog" not in current.json()["result"]
+    assert current.json()["progress"]["message"] == "Book installation finished"
+    messages = [event["message"] for event in current.json()["progress_events"]]
+    assert "Starting LibGen EPUB search" in messages
+    assert "Metadata saved" in messages
+    assert "reMarkable sync complete" in messages
     assert install.call_args.args[1]["queries"] == ["A Book"]
+    assert callable(install.call_args.kwargs["progress_callback"])
 
 
 def test_job_status_rejects_invalid_or_missing_ids(tmp_path) -> None:

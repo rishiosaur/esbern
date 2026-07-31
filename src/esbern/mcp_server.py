@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any, Literal
@@ -10,12 +11,15 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
 _API_URL = os.environ.get("ESBERN_INTERNAL_API_URL", "http://127.0.0.1:8037").rstrip(
     "/"
 )
+_JOB_POLL_INTERVAL = 0.5
+_TERMINAL_JOB_STATUSES = {"succeeded", "failed"}
 
 mcp = MCPServer(
     name="esbern-library",
@@ -27,7 +31,9 @@ mcp = MCPServer(
         "records may not expose ISBN metadata. If either check finds the book, do not "
         "call add_book; return a 'Duplicate book error' and say nothing was added. "
         "Only add when the user clearly asks and no duplicate exists. Report the "
-        "background job id and use check_book_job when the user wants its status."
+        "download and reMarkable sync progress emitted by add_book. If that tool call "
+        "is interrupted, the background job keeps running; use check_book_job with "
+        "the reported job id to recover its latest progress and result."
     ),
 )
 
@@ -69,6 +75,41 @@ def _request(
     return result
 
 
+def _progress_message(job_id: str, event: dict[str, object]) -> str:
+    message = str(event.get("message") or "Working")
+    detail = event.get("detail")
+    if detail:
+        message = f"{message} — {detail}"
+    return f"Job {job_id}: {message}"
+
+
+async def _relay_progress(
+    context: Context,
+    record: dict[str, Any],
+    *,
+    job_id: str,
+    after_sequence: int,
+) -> int:
+    events = record.get("progress_events")
+    if not isinstance(events, list):
+        current = record.get("progress")
+        events = [current] if isinstance(current, dict) else []
+
+    latest = after_sequence
+    valid_events = [event for event in events if isinstance(event, dict)]
+    valid_events.sort(key=lambda event: int(event.get("sequence", -1)))
+    for event in valid_events:
+        sequence = int(event.get("sequence", -1))
+        if sequence <= latest:
+            continue
+        await context.report_progress(
+            float(sequence + 1),
+            message=_progress_message(job_id, event),
+        )
+        latest = sequence
+    return latest
+
+
 @mcp.tool(
     title="Get full library",
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
@@ -97,23 +138,50 @@ def search_library(query: str, limit: int = 20) -> dict[str, Any]:
         openWorldHint=True,
     ),
 )
-def add_book(
+async def add_book(
     query: str,
+    context: Context,
     format: Literal["auto", "epub", "pdf"] = "auto",
     source: Literal["auto", "libgen", "arxiv"] = "libgen",
 ) -> dict[str, Any]:
-    """Queue a non-duplicate book for download and automatic reMarkable sync.
+    """Download a non-duplicate book, streaming steps through reMarkable sync.
 
     Determine ISBN-13 and search by ISBN, then exact title/author/edition. Never call
     this tool when either check finds the book. Call only after an explicit add request.
-    The returned job continues in the background.
+    The underlying job continues in the background if this tool call is interrupted.
     """
-    return _request(
+    record = await asyncio.to_thread(
+        _request,
         "POST",
         "/api/jobs/books",
         {"query": query, "format": format, "source": source},
         authenticated=True,
     )
+    job_id = str(record.get("id") or "")
+    if not job_id:
+        raise RuntimeError("Esbern queued the book without returning a job id.")
+
+    sequence = await _relay_progress(
+        context,
+        record,
+        job_id=job_id,
+        after_sequence=-1,
+    )
+    while record.get("status") not in _TERMINAL_JOB_STATUSES:
+        await asyncio.sleep(_JOB_POLL_INTERVAL)
+        record = await asyncio.to_thread(
+            _request,
+            "GET",
+            f"/api/jobs/{job_id}",
+            authenticated=True,
+        )
+        sequence = await _relay_progress(
+            context,
+            record,
+            job_id=job_id,
+            after_sequence=sequence,
+        )
+    return record
 
 
 @mcp.tool(
@@ -132,7 +200,7 @@ def main() -> None:
         port=8038,
         streamable_http_path="/",
         stateless_http=True,
-        json_response=True,
+        json_response=False,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=[
