@@ -8,14 +8,18 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from esbern.server_library import install_books
+from esbern.downloader import ProgressCallback
+from esbern.server_library import install_books, synchronize
 
 _MAX_PROGRESS_EVENTS = 200
 _MIN_PROGRESS_INTERVAL = 0.25
+JobOperation = Callable[[ProgressCallback], dict[str, object]]
+JobRunner = Callable[[str, dict[str, object]], None]
 
 
 def _now() -> str:
@@ -37,11 +41,22 @@ class JobStore:
         self._executor.shutdown(wait=False, cancel_futures=False)
 
     def enqueue_book(self, payload: dict[str, object]) -> dict[str, object]:
+        return self._enqueue("install_book", payload, self._run_book)
+
+    def enqueue_sync(self, payload: dict[str, object]) -> dict[str, object]:
+        return self._enqueue("sync_library", payload, self._run_sync)
+
+    def _enqueue(
+        self,
+        job_type: str,
+        payload: dict[str, object],
+        runner: JobRunner,
+    ) -> dict[str, object]:
         job_id = uuid.uuid4().hex
         now = _now()
         record: dict[str, object] = {
             "id": job_id,
-            "type": "install_book",
+            "type": job_type,
             "status": "queued",
             "created_at": now,
             "updated_at": now,
@@ -64,7 +79,7 @@ class JobStore:
             ],
         }
         self._save(record)
-        self._executor.submit(self._run_book, job_id, payload)
+        self._executor.submit(runner, job_id, payload)
         return record
 
     def get(self, job_id: str) -> dict[str, object]:
@@ -80,6 +95,53 @@ class JobStore:
         return value
 
     def _run_book(self, job_id: str, payload: dict[str, object]) -> None:
+        def install(progress_callback: ProgressCallback) -> dict[str, object]:
+            result = install_books(
+                self.library_root,
+                payload,
+                progress_callback=progress_callback,
+            )
+            catalog_result = result.pop("catalog", None)
+            if isinstance(catalog_result, dict):
+                result["catalog_count"] = catalog_result.get("count")
+            return result
+
+        self._run_job(
+            job_id,
+            operation=install,
+            start_message="Starting book installation",
+            finish_message="Book installation finished",
+            failure_message="Book installation failed",
+        )
+
+    def _run_sync(self, job_id: str, payload: dict[str, object]) -> None:
+        def sync(progress_callback: ProgressCallback) -> dict[str, object]:
+            workers = payload.get("workers", 4)
+            if isinstance(workers, bool) or not isinstance(workers, int):
+                raise TypeError("Sync workers must be an integer.")
+            return synchronize(
+                self.library_root,
+                workers=workers,
+                progress_callback=progress_callback,
+            )
+
+        self._run_job(
+            job_id,
+            operation=sync,
+            start_message="Starting library sync",
+            finish_message="Library sync finished",
+            failure_message="Library sync failed",
+        )
+
+    def _run_job(
+        self,
+        job_id: str,
+        *,
+        operation: JobOperation,
+        start_message: str,
+        finish_message: str,
+        failure_message: str,
+    ) -> None:
         record = self.get(job_id)
         progress_lock = threading.Lock()
         last_saved_at = 0.0
@@ -138,26 +200,19 @@ class JobStore:
         record["status"] = "running"
         record["updated_at"] = _now()
         self._save(record)
-        report_progress("Starting book installation", None, force=True)
+        report_progress(start_message, None, force=True)
         try:
-            result = install_books(
-                self.library_root,
-                payload,
-                progress_callback=report_progress,
-            )
-            catalog_result = result.pop("catalog", None)
-            if isinstance(catalog_result, dict):
-                result["catalog_count"] = catalog_result.get("count")
+            result = operation(report_progress)
             record["status"] = "succeeded"
             record["result"] = result
-            report_progress("Book installation finished", None, force=True)
+            report_progress(finish_message, None, force=True)
         except Exception as error:  # noqa: BLE001 - persist background failures
             record["status"] = "failed"
             record["error"] = {
                 "type": type(error).__name__,
                 "message": str(error),
             }
-            report_progress("Book installation failed", str(error), force=True)
+            report_progress(failure_message, str(error), force=True)
         record["updated_at"] = _now()
         self._save(record)
 
@@ -197,13 +252,18 @@ class JobStore:
                 "type": "InterruptedError",
                 "message": "The server restarted before this job completed.",
             }
+            operation = (
+                "Library sync"
+                if record.get("type") == "sync_library"
+                else "Book installation"
+            )
             previous = record.get("progress")
             sequence = (
                 int(previous.get("sequence", -1)) if isinstance(previous, dict) else -1
             )
             progress = {
                 "sequence": sequence + 1,
-                "message": "Book installation interrupted",
+                "message": f"{operation} interrupted",
                 "detail": "The server restarted before this job completed.",
                 "updated_at": record["updated_at"],
             }

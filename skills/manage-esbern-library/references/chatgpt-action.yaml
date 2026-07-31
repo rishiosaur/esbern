@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Esbern Library
-  description: Search the owner's library and queue books for download and reMarkable synchronization. Before adding, resolve ISBN-13, search by ISBN, then confirm by exact title, author, and edition. Never queue a duplicate.
+  description: Search the owner's library, queue books for download, and synchronize with reMarkable. Before adding, resolve ISBN-13, search by ISBN, then confirm by exact title, author, and edition. Never queue a duplicate.
   version: 0.1.0
 servers:
   - url: https://esbern.rishi.cx
@@ -68,8 +68,8 @@ paths:
           description: Queued job
   /api/jobs/{job_id}:
     get:
-      operationId: getBookJob
-      summary: Check an installation job
+      operationId: getJob
+      summary: Check a background job
       security:
         - BearerAuth: []
       parameters:
@@ -81,6 +81,29 @@ paths:
       responses:
         '200':
           description: Current job state
+  /api/jobs/sync:
+    post:
+      operationId: queueLibrarySync
+      summary: Queue a full library sync
+      description: Queue a two-way reconciliation of every configured library folder with reMarkable. Returns immediately with a job ID.
+      security:
+        - BearerAuth: []
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workers:
+                  type: integer
+                  minimum: 1
+                  maximum: 8
+                  default: 4
+      responses:
+        '202':
+          description: Queued sync job
 components:
   securitySchemes:
     BearerAuth:

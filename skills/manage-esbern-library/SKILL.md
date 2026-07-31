@@ -1,6 +1,6 @@
 ---
 name: manage-esbern-library
-description: Search, browse, and add books to the owner's hosted Esbern library from ChatGPT or Claude, including checking background installation and reMarkable sync jobs. Use when the user asks what books are in their library, whether they already own a title, or asks to add, fetch, download, or install a book into their library.
+description: Search, browse, add books to, and synchronize the owner's hosted Esbern library from ChatGPT or Claude, including checking background jobs. Use when the user asks what books are in their library, whether they already own a title, asks to add, fetch, download, or install a book, or asks to sync or reconcile the library with reMarkable.
 ---
 
 # Manage Esbern Library
@@ -29,11 +29,15 @@ read local folders.
   reMarkable sync.
 - In Claude, keep `add_book` open and surface its live download, metadata, and
   reMarkable sync updates. Report its terminal result. If the stream is
-  interrupted, use the job ID from the progress messages with `check_book_job`;
+  interrupted, use the job ID from the progress messages with `check_job`;
   the server-side job continues.
-- In ChatGPT, report the job ID returned by `queueBook`. Use `getBookJob` when
+- In ChatGPT, report the job ID returned by `queueBook`. Use `getJob` when
   the user asks for progress, or once after enqueueing when the tool can be
   called without delaying the response.
+- Only call `sync_library` (Claude) or `queueLibrarySync` (ChatGPT) when the
+  user explicitly asks to synchronize or reconcile the library with
+  reMarkable. Claude streams the sync phases through its open tool call.
+  ChatGPT returns a job ID to check with `getJob`.
 
 Use `auto` format unless the user requests EPUB or PDF. Use the default source
 unless the user names arXiv or provides an arXiv identifier. Never retry a

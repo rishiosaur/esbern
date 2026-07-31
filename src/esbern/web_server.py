@@ -179,6 +179,7 @@ def create_app(library_root: Path) -> FastAPI:
                 "install": "POST /api/books",
                 "bulk_install": "POST text/plain to /api/books/bulk",
                 "queue_install": "POST /api/jobs/books",
+                "queue_sync": "POST /api/jobs/sync",
                 "job_status": "GET /api/jobs/{job_id}",
                 "sync": "POST /api/sync",
             },
@@ -237,6 +238,20 @@ def create_app(library_root: Path) -> FastAPI:
         payload = request.model_dump()
         payload["queries"] = [payload.pop("query")]
         record = jobs.enqueue_book(payload)
+        response.headers["Location"] = f"/api/jobs/{record['id']}"
+        return record
+
+    @app.post(
+        "/api/jobs/sync",
+        status_code=202,
+        tags=["jobs"],
+        dependencies=[Depends(authorize)],
+    )
+    def queue_sync(
+        request: SyncRequest,
+        response: Response,
+    ) -> dict[str, object]:
+        record = jobs.enqueue_sync(request.model_dump())
         response.headers["Location"] = f"/api/jobs/{record['id']}"
         return record
 
@@ -464,9 +479,12 @@ def _chatgpt_action_schema() -> dict[str, object]:
             },
             "/api/jobs/{job_id}": {
                 "get": {
-                    "operationId": "getBookJob",
-                    "summary": "Check an installation job",
-                    "description": "Return queued, running, succeeded, or failed state and the final result.",
+                    "operationId": "getJob",
+                    "summary": "Check a background job",
+                    "description": (
+                        "Return queued, running, succeeded, or failed state, "
+                        "progress events, and the final result for a book or sync job."
+                    ),
                     "security": [{"BearerAuth": []}],
                     "parameters": [
                         {
@@ -479,6 +497,42 @@ def _chatgpt_action_schema() -> dict[str, object]:
                     "responses": {
                         "200": {
                             "description": "Current job state",
+                            "content": {"application/json": {"schema": book_response}},
+                        }
+                    },
+                }
+            },
+            "/api/jobs/sync": {
+                "post": {
+                    "operationId": "queueLibrarySync",
+                    "summary": "Queue a full library sync",
+                    "description": (
+                        "Queue a two-way reconciliation of every configured library "
+                        "folder with the reMarkable. Return immediately with a job id."
+                    ),
+                    "security": [{"BearerAuth": []}],
+                    "x-openai-isConsequential": True,
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "workers": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "maximum": 8,
+                                            "default": 4,
+                                        }
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "202": {
+                            "description": "Queued sync job",
                             "content": {"application/json": {"schema": book_response}},
                         }
                     },

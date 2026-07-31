@@ -148,6 +148,11 @@ def test_chatgpt_action_schema_exposes_read_and_queued_write_tools(tmp_path) -> 
     assert "ISBN" in queue["description"]
     assert queue["x-openai-isConsequential"] is True
     assert queue["security"] == [{"BearerAuth": []}]
+    sync = schema["paths"]["/api/jobs/sync"]["post"]
+    assert sync["operationId"] == "queueLibrarySync"
+    assert sync["x-openai-isConsequential"] is True
+    assert sync["security"] == [{"BearerAuth": []}]
+    assert schema["paths"]["/api/jobs/{job_id}"]["get"]["operationId"] == "getJob"
 
 
 @patch("esbern.server_jobs.install_books")
@@ -200,6 +205,50 @@ def test_phone_client_can_queue_and_poll_an_authenticated_book_job(
     assert "reMarkable sync complete" in messages
     assert install.call_args.args[1]["queries"] == ["A Book"]
     assert callable(install.call_args.kwargs["progress_callback"])
+
+
+@patch("esbern.server_jobs.synchronize")
+def test_phone_client_can_queue_and_poll_an_authenticated_sync_job(
+    synchronize, tmp_path
+) -> None:
+    def synced(_root, *, workers, progress_callback):
+        progress_callback("reMarkable sync: pull", "checking 12 documents")
+        progress_callback("reMarkable sync complete", "2 file changes")
+        return {"ok": True, "stats": {"files_pulled": 1, "files_uploaded": 1}}
+
+    synchronize.side_effect = synced
+    headers = {"Authorization": "Bearer secret-token"}
+
+    with (
+        patch.dict(os.environ, {"ESBERN_API_TOKEN": "secret-token"}),
+        TestClient(create_app(tmp_path)) as client,
+    ):
+        unauthorized = client.post("/api/jobs/sync", json={"workers": 3})
+        queued = client.post(
+            "/api/jobs/sync",
+            json={"workers": 3},
+            headers=headers,
+        )
+        job_id = queued.json()["id"]
+        deadline = time.monotonic() + 2
+        while True:
+            current = client.get(f"/api/jobs/{job_id}", headers=headers)
+            if current.json()["status"] in {"succeeded", "failed"}:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+    assert unauthorized.status_code == 401
+    assert queued.status_code == 202
+    assert queued.headers["location"] == f"/api/jobs/{job_id}"
+    assert current.json()["type"] == "sync_library"
+    assert current.json()["status"] == "succeeded"
+    assert current.json()["result"]["stats"]["files_uploaded"] == 1
+    assert current.json()["progress"]["message"] == "Library sync finished"
+    synchronize.assert_called_once()
+    assert synchronize.call_args.args == (tmp_path,)
+    assert synchronize.call_args.kwargs["workers"] == 3
+    assert callable(synchronize.call_args.kwargs["progress_callback"])
 
 
 def test_job_status_rejects_invalid_or_missing_ids(tmp_path) -> None:

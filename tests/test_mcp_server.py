@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock, patch
 
 from esbern.mcp_server import (
     add_book,
-    check_book_job,
+    check_job,
     get_full_library,
     mcp,
     search_library,
+    sync_library,
 )
 
 
@@ -22,12 +23,16 @@ def test_mcp_exposes_phone_assistant_tools_with_safe_annotations() -> None:
         "get_full_library",
         "search_library",
         "add_book",
+        "sync_library",
+        "check_job",
         "check_book_job",
     }
     assert tools["get_full_library"].annotations.read_only_hint is True
     assert tools["search_library"].annotations.read_only_hint is True
     assert tools["add_book"].annotations.read_only_hint is False
     assert tools["add_book"].annotations.idempotent_hint is False
+    assert tools["sync_library"].annotations.read_only_hint is False
+    assert tools["sync_library"].annotations.idempotent_hint is True
 
 
 @patch("esbern.mcp_server._request")
@@ -92,7 +97,7 @@ def test_mcp_write_and_status_tools_authenticate(request) -> None:
         )
 
     assert result["status"] == "succeeded"
-    assert check_book_job("abc")["status"] == "succeeded"
+    assert check_job("abc")["status"] == "succeeded"
     progress = context.report_progress.await_args_list
     assert [call.args[0] for call in progress] == [1.0, 2.0, 3.0]
     assert progress[0].kwargs["message"] == "Job abc: Queued"
@@ -115,3 +120,56 @@ def test_mcp_write_and_status_tools_authenticate(request) -> None:
     assert request.call_args_list[2].kwargs == {"authenticated": True}
     assert request.call_args_list[3].args == ("GET", "/api/jobs/abc")
     assert request.call_args_list[3].kwargs == {"authenticated": True}
+
+
+@patch("esbern.mcp_server._request")
+def test_mcp_sync_tool_streams_a_queued_sync_job(request) -> None:
+    request.side_effect = [
+        {
+            "id": "sync-abc",
+            "status": "queued",
+            "progress_events": [{"sequence": 0, "message": "Queued", "detail": None}],
+        },
+        {
+            "id": "sync-abc",
+            "status": "running",
+            "progress_events": [
+                {
+                    "sequence": 1,
+                    "message": "reMarkable sync: pull",
+                    "detail": "checking 12 documents",
+                }
+            ],
+        },
+        {
+            "id": "sync-abc",
+            "status": "succeeded",
+            "progress_events": [
+                {
+                    "sequence": 2,
+                    "message": "Library sync finished",
+                    "detail": None,
+                }
+            ],
+        },
+    ]
+    context = SimpleNamespace(report_progress=AsyncMock())
+
+    with patch("esbern.mcp_server.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(sync_library(context, workers=3))
+
+    assert result["status"] == "succeeded"
+    messages = [
+        call.kwargs["message"] for call in context.report_progress.await_args_list
+    ]
+    assert messages == [
+        "Job sync-abc: Queued",
+        "Job sync-abc: reMarkable sync: pull — checking 12 documents",
+        "Job sync-abc: Library sync finished",
+    ]
+    assert request.call_args_list[0].args == (
+        "POST",
+        "/api/jobs/sync",
+        {"workers": 3},
+    )
+    assert request.call_args_list[0].kwargs == {"authenticated": True}

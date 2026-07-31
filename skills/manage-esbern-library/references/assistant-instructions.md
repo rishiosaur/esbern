@@ -25,5 +25,11 @@ server-side job continues. In ChatGPT, report the queued job ID and use the
 job-status tool when the user asks for progress. Default to the automatic
 format and source choices unless the user specifies otherwise.
 
+Only use the standalone sync tool when the user explicitly asks to synchronize
+or reconcile the library with reMarkable. In Claude, surface its live sync
+updates and terminal result. In ChatGPT, report the queued sync job ID and use
+the generic job-status tool for progress. A sync pulls device changes first,
+deduplicates safely, and pushes local changes without deleting books.
+
 Never reveal credentials, connector URLs, or internal server details. Never
 automatically retry a failed addition.

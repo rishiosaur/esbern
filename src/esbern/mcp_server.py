@@ -24,7 +24,7 @@ _TERMINAL_JOB_STATUSES = {"succeeded", "failed"}
 mcp = MCPServer(
     name="esbern-library",
     title="Esbern Library",
-    description="Search a private book library and queue books for installation.",
+    description="Search, add to, and synchronize a private book library.",
     instructions=(
         "Before every addition, determine the edition's ISBN-13 without guessing. "
         "Search by ISBN first, then exact title, author, and edition because older "
@@ -32,8 +32,10 @@ mcp = MCPServer(
         "call add_book; return a 'Duplicate book error' and say nothing was added. "
         "Only add when the user clearly asks and no duplicate exists. Report the "
         "download and reMarkable sync progress emitted by add_book. If that tool call "
-        "is interrupted, the background job keeps running; use check_book_job with "
-        "the reported job id to recover its latest progress and result."
+        "is interrupted, the background job keeps running; use check_job with the "
+        "reported job id to recover its latest progress and result. Only call "
+        "sync_library when the user explicitly asks to synchronize their library, "
+        "then report its live progress and terminal result."
     ),
 )
 
@@ -110,6 +112,37 @@ async def _relay_progress(
     return latest
 
 
+async def _watch_job(
+    context: Context,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    job_id = str(record.get("id") or "")
+    if not job_id:
+        raise RuntimeError("Esbern queued work without returning a job id.")
+
+    sequence = await _relay_progress(
+        context,
+        record,
+        job_id=job_id,
+        after_sequence=-1,
+    )
+    while record.get("status") not in _TERMINAL_JOB_STATUSES:
+        await asyncio.sleep(_JOB_POLL_INTERVAL)
+        record = await asyncio.to_thread(
+            _request,
+            "GET",
+            f"/api/jobs/{job_id}",
+            authenticated=True,
+        )
+        sequence = await _relay_progress(
+            context,
+            record,
+            job_id=job_id,
+            after_sequence=sequence,
+        )
+    return record
+
+
 @mcp.tool(
     title="Get full library",
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
@@ -157,40 +190,54 @@ async def add_book(
         {"query": query, "format": format, "source": source},
         authenticated=True,
     )
-    job_id = str(record.get("id") or "")
-    if not job_id:
-        raise RuntimeError("Esbern queued the book without returning a job id.")
-
-    sequence = await _relay_progress(
-        context,
-        record,
-        job_id=job_id,
-        after_sequence=-1,
-    )
-    while record.get("status") not in _TERMINAL_JOB_STATUSES:
-        await asyncio.sleep(_JOB_POLL_INTERVAL)
-        record = await asyncio.to_thread(
-            _request,
-            "GET",
-            f"/api/jobs/{job_id}",
-            authenticated=True,
-        )
-        sequence = await _relay_progress(
-            context,
-            record,
-            job_id=job_id,
-            after_sequence=sequence,
-        )
-    return record
+    return await _watch_job(context, record)
 
 
 @mcp.tool(
-    title="Check book job",
+    title="Synchronize library",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+async def sync_library(
+    context: Context,
+    workers: int = 4,
+) -> dict[str, Any]:
+    """Synchronize every library folder with reMarkable, streaming each phase.
+
+    Call only when the user explicitly asks for a sync. Esbern pulls device changes
+    first, safely deduplicates, then pushes local changes without deleting books.
+    The underlying job continues in the background if this tool call is interrupted.
+    """
+    record = await asyncio.to_thread(
+        _request,
+        "POST",
+        "/api/jobs/sync",
+        {"workers": workers},
+        authenticated=True,
+    )
+    return await _watch_job(context, record)
+
+
+@mcp.tool(
+    title="Check background job",
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+)
+def check_job(job_id: str) -> dict[str, Any]:
+    """Check a book installation or library sync job and its persisted progress."""
+    return _request("GET", f"/api/jobs/{job_id}", authenticated=True)
+
+
+@mcp.tool(
+    title="Check book job (legacy)",
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
 )
 def check_book_job(job_id: str) -> dict[str, Any]:
-    """Check whether a queued book installation is queued, running, or finished."""
-    return _request("GET", f"/api/jobs/{job_id}", authenticated=True)
+    """Compatibility alias for checking an existing book installation job."""
+    return check_job(job_id)
 
 
 def main() -> None:

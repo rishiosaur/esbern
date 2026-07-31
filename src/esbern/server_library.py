@@ -523,9 +523,18 @@ def _sync(
     }
 
 
-def synchronize(root: Path, *, workers: int = 4) -> dict[str, object]:
+def synchronize(
+    root: Path,
+    *,
+    workers: int = 4,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, object]:
     with _library_lock(root):
-        return _sync(root, workers=workers)
+        return _sync(
+            root,
+            workers=workers,
+            progress_callback=progress_callback,
+        )
 
 
 def _query_list(raw: object) -> list[str]:
