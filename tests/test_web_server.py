@@ -140,10 +140,12 @@ def test_chatgpt_action_schema_exposes_read_and_queued_write_tools(tmp_path) -> 
 
     assert response.status_code == 200
     schema = response.json()
+    assert "search by ISBN" in schema["info"]["description"]
     assert schema["paths"]["/api/books"]["get"]["operationId"] == "listLibrary"
     assert schema["paths"]["/api/books/search"]["get"]["operationId"] == "searchLibrary"
     queue = schema["paths"]["/api/jobs/books"]["post"]
     assert queue["operationId"] == "queueBook"
+    assert "ISBN" in queue["description"]
     assert queue["x-openai-isConsequential"] is True
     assert queue["security"] == [{"BearerAuth": []}]
 

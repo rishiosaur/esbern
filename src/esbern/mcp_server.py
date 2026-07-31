@@ -22,9 +22,12 @@ mcp = MCPServer(
     title="Esbern Library",
     description="Search a private book library and queue books for installation.",
     instructions=(
-        "Search the library before adding a book. Only add when the user clearly asks "
-        "for an installation. Adding returns a background job; report the job id and "
-        "use check_book_job when the user wants its status."
+        "Before every addition, determine the edition's ISBN-13 without guessing. "
+        "Search by ISBN first, then exact title, author, and edition because older "
+        "records may not expose ISBN metadata. If either check finds the book, do not "
+        "call add_book; return a 'Duplicate book error' and say nothing was added. "
+        "Only add when the user clearly asks and no duplicate exists. Report the "
+        "background job id and use check_book_job when the user wants its status."
     ),
 )
 
@@ -99,9 +102,10 @@ def add_book(
     format: Literal["auto", "epub", "pdf"] = "auto",
     source: Literal["auto", "libgen", "arxiv"] = "libgen",
 ) -> dict[str, Any]:
-    """Queue a requested book for download and automatic reMarkable sync.
+    """Queue a non-duplicate book for download and automatic reMarkable sync.
 
-    Search first. Call this tool only when the user explicitly asks to add a book.
+    Determine ISBN-13 and search by ISBN, then exact title/author/edition. Never call
+    this tool when either check finds the book. Call only after an explicit add request.
     The returned job continues in the background.
     """
     return _request(

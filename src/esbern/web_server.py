@@ -337,7 +337,9 @@ def _chatgpt_action_schema() -> dict[str, object]:
             "title": "Esbern Library",
             "description": (
                 "Search the owner's book library and queue new books for download "
-                "and reMarkable synchronization. Search before adding a book."
+                "and reMarkable synchronization. Before adding, resolve ISBN-13, "
+                "search by ISBN, then confirm by exact title, author, and edition. "
+                "Do not queue a duplicate."
             ),
             "version": __version__,
         },
@@ -360,7 +362,11 @@ def _chatgpt_action_schema() -> dict[str, object]:
                 "get": {
                     "operationId": "searchLibrary",
                     "summary": "Search the library",
-                    "description": "Search title, author, year, folder, path, and format. Use this before queueing a book.",
+                    "description": (
+                        "Search title, author, year, folder, path, and format. Before "
+                        "queueing, search ISBN-13 first and then exact title, author, "
+                        "and edition because older records may not expose ISBN."
+                    ),
                     "parameters": [
                         {
                             "name": "q",
@@ -396,7 +402,12 @@ def _chatgpt_action_schema() -> dict[str, object]:
                 "post": {
                     "operationId": "queueBook",
                     "summary": "Queue a book for installation",
-                    "description": "Queue one book for download into Books and automatic reMarkable synchronization. Return immediately with a job id.",
+                    "description": (
+                        "Queue one non-duplicate book for download into Books and "
+                        "automatic reMarkable synchronization. Call only after ISBN "
+                        "and exact title-author-edition searches find no match. Return "
+                        "immediately with a job id."
+                    ),
                     "security": [{"BearerAuth": []}],
                     "x-openai-isConsequential": True,
                     "requestBody": {

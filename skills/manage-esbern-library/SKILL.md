@@ -14,8 +14,14 @@ read local folders.
   (ChatGPT).
 - To find a book, call `search_library` or `searchLibrary`. Search by the most
   distinctive available title and author terms.
-- To add a book, search first. If there is a strong title-and-author match,
-  explain that it is already present and do not enqueue a duplicate.
+- Before every add, determine the requested edition's ISBN-13 from an ISBN the
+  user supplied or a reliable metadata/web lookup. Never guess an ISBN. Search
+  the library by ISBN first, then search the exact title, author, and edition
+  because older catalog entries may not expose ISBN metadata.
+- If the ISBN matches, or the title-author-edition search is a strong match,
+  stop without calling the add tool. Respond: `Duplicate book error: this book
+  is already in your library. Nothing was added.` Include the matching title,
+  ISBN when known, and library path.
 - If the requested edition or title is ambiguous, ask one short clarifying
   question before adding it.
 - Only call `add_book` or `queueBook` after the user explicitly asks to add,

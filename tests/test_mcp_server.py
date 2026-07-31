@@ -15,6 +15,8 @@ from esbern.mcp_server import (
 def test_mcp_exposes_phone_assistant_tools_with_safe_annotations() -> None:
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
 
+    assert "Search by ISBN first" in mcp.instructions
+    assert "Duplicate book error" in mcp.instructions
     assert set(tools) == {
         "get_full_library",
         "search_library",

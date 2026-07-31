@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Esbern Library
-  description: Search the owner's library and queue books for download and reMarkable synchronization. Search before adding a book.
+  description: Search the owner's library and queue books for download and reMarkable synchronization. Before adding, resolve ISBN-13, search by ISBN, then confirm by exact title, author, and edition. Never queue a duplicate.
   version: 0.1.0
 servers:
   - url: https://esbern.rishi.cx
@@ -17,6 +17,7 @@ paths:
     get:
       operationId: searchLibrary
       summary: Search the library
+      description: Before queueing a book, search its ISBN-13 first and then its exact title, author, and edition because older records may not expose ISBN.
       parameters:
         - name: q
           in: query
@@ -38,7 +39,7 @@ paths:
     post:
       operationId: queueBook
       summary: Queue a book for installation
-      description: Queue one book for download and automatic reMarkable synchronization. Returns immediately with a job ID.
+      description: Queue one non-duplicate book for download and automatic reMarkable synchronization. Call only after ISBN and exact title-author-edition searches find no match. Returns immediately with a job ID.
       security:
         - BearerAuth: []
       x-openai-isConsequential: true
