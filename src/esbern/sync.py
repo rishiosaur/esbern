@@ -350,6 +350,7 @@ def _upload_file(
     reporter: SyncReporter | None = None,
     current: int | None = None,
     total: int | None = None,
+    check_remote_changes: bool = True,
 ) -> None:
     ext = rel.suffix.lower()
     if ext not in SUPPORTED_EXTS:
@@ -364,13 +365,20 @@ def _upload_file(
     file_type = ext.lstrip(".")
     display_name = rel.stem
 
-    # Detect whether each side changed since last sync.
+    # Full sync checks both sides. A one-way push trusts the local checkpoint
+    # and skips unchanged books without contacting the device for each one.
     local_changed = not prev or prev.size != st.st_size or prev.mtime != st.st_mtime
+    if prev and not local_changed and not check_remote_changes:
+        _emit(reporter, "item", "push", "unchanged", key, current, total)
+        return
+
     remote_changed = False
     remote_metadata_exists = False
     if prev:
         meta_path = rm.remote_path(f"{prev.uuid}.metadata")
-        if rm.exists(meta_path):
+        if not check_remote_changes:
+            remote_metadata_exists = rm.exists(meta_path)
+        elif rm.exists(meta_path):
             remote_metadata_exists = True
             current_remote = max(
                 rm.stat_mtime(meta_path), rm.annotation_dir_mtime(prev.uuid)
@@ -503,6 +511,7 @@ def _plan_parallel_upload(
     reporter: SyncReporter | None,
     current: int,
     total: int,
+    check_remote_changes: bool = True,
 ) -> _UploadPlan | None:
     """Classify sync state serially before a file is handed to a worker."""
     ext = rel.suffix.lower()
@@ -516,8 +525,12 @@ def _plan_parallel_upload(
     key = rel.as_posix()
     prev = state.files.get(key)
     local_changed = not prev or prev.size != st.st_size or prev.mtime != st.st_mtime
+    if prev and not local_changed and not check_remote_changes:
+        _emit(reporter, "item", "push", "unchanged", key, current, total)
+        return None
+
     remote_changed = False
-    if prev:
+    if prev and check_remote_changes:
         meta_path = rm.remote_path(f"{prev.uuid}.metadata")
         if rm.exists(meta_path):
             current_remote = max(
@@ -829,6 +842,7 @@ def _push(
     reporter: SyncReporter | None = None,
     workers: int = 1,
     paths: Sequence[Path] | None = None,
+    check_remote_changes: bool = True,
 ) -> None:
     entries = (
         _selected_push_entries(local_root, paths)
@@ -895,6 +909,7 @@ def _push(
                 reporter,
                 index,
                 len(entries),
+                check_remote_changes,
             )
             if plan:
                 plans.append(plan)
@@ -910,6 +925,7 @@ def _push(
                 reporter,
                 index,
                 len(entries),
+                check_remote_changes,
             )
 
     if workers > 1:
@@ -1953,6 +1969,7 @@ def push(
             reporter,
             workers=workers,
             paths=paths,
+            check_remote_changes=False,
         )
         _emit(reporter, "phase", "finish", "Saving push state and tags")
         state.save(local_root)

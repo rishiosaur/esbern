@@ -45,6 +45,9 @@ class FakeRemarkable:
         self.uploads: list[tuple[Path, str]] = []
         self.downloads: list[tuple[str, Path]] = []
         self.restart_count = 0
+        self.exists_calls: list[str] = []
+        self.stat_mtime_calls: list[str] = []
+        self.annotation_dir_mtime_calls: list[str] = []
 
     def remote_path(self, path: str) -> str:
         return path
@@ -60,6 +63,7 @@ class FakeRemarkable:
         return self.entries[path].text
 
     def exists(self, path: str) -> bool:
+        self.exists_calls.append(path)
         return path in self.entries or path in self.payloads
 
     def put_text(self, path: str, text: str) -> None:
@@ -67,6 +71,7 @@ class FakeRemarkable:
         self.writes.append((path, text))
 
     def stat_mtime(self, path: str) -> float:
+        self.stat_mtime_calls.append(path)
         return self.entries[path].mtime
 
     def stat_size(self, path: str) -> int | None:
@@ -78,6 +83,7 @@ class FakeRemarkable:
         return hashlib.sha256(payload).hexdigest() if payload is not None else None
 
     def annotation_dir_mtime(self, uid: str) -> float:
+        self.annotation_dir_mtime_calls.append(uid)
         return 0.0
 
     def get_file(self, remote: str, local, callback=None) -> None:
@@ -297,6 +303,56 @@ def test_targeted_push_uploads_only_selected_books_without_remote_pull(
     assert selected.name in State.load(local_root).files
     assert unselected.name not in State.load(local_root).files
     assert not any(unselected.name in event.item for event in events)
+
+
+def test_one_way_push_skips_remote_checks_for_locally_unchanged_books(
+    tmp_path, monkeypatch
+) -> None:
+    local_root = tmp_path / "Books"
+    local_root.mkdir()
+    local_book = local_root / "Already There.epub"
+    local_book.write_bytes(b"unchanged")
+    stat = local_book.stat()
+    rm = FakeRemarkable(
+        {
+            "root": xochitl.collection_metadata("Books"),
+            "book": xochitl.document_metadata("Already There", parent="root"),
+        }
+    )
+    State(
+        root_uuid="root",
+        files={
+            local_book.name: FileEntry(
+                uuid="book",
+                file_type="epub",
+                size=stat.st_size,
+                mtime=stat.st_mtime,
+                remote_mtime=1.0,
+            )
+        },
+    ).save(local_root)
+
+    store = TagStore()
+    monkeypatch.setattr("esbern.sync.TagStore.load", lambda: store)
+    monkeypatch.setattr("esbern.sync.TagStore.save", lambda self: None)
+    monkeypatch.setattr(
+        "esbern.sync.categorize",
+        lambda *args: pytest.fail("unchanged books must not be classified"),
+    )
+
+    events: list[SyncEvent] = []
+    stats = push(rm, local_root, restart=False, reporter=events.append, workers=4)
+
+    assert stats.files_uploaded == 0
+    assert stats.files_updated == 0
+    assert rm.uploads == []
+    assert rm.exists_calls == ["root.metadata"]
+    assert rm.stat_mtime_calls == []
+    assert rm.annotation_dir_mtime_calls == []
+    assert any(
+        event.action == "unchanged" and event.item == local_book.name
+        for event in events
+    )
 
 
 @pytest.mark.parametrize("workers", [1, 2])

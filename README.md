@@ -29,8 +29,10 @@ whose name matches the local folder (case-insensitively). If more than
 one folder matches, it stops and asks you to resolve the duplicate
 instead of guessing or creating another folder.
 
-**Push:** walk the local tree, ensure folders + documents exist on the
-device, upload anything new or locally modified.
+**Push:** validate the linked root, walk the local tree, and trust the last
+local checkpoint for unchanged books. Only new or locally modified books touch
+the device; use a full sync when you need remote deletion or annotation changes
+reconciled.
 
 **Pull:** read the parent-link headers needed to reconstruct reMarkable's flat
 UUID hierarchy, then inventory and process only descendants of the active

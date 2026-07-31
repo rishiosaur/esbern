@@ -250,7 +250,7 @@ async def push_library(
     context: Context,
     workers: int = 4,
 ) -> dict[str, Any]:
-    """Push local changes to reMarkable without scanning or pulling device books."""
+    """Push new/local changes without checking each unchanged device book."""
     record = await asyncio.to_thread(
         _request,
         "POST",
