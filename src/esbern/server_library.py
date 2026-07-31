@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import html
 import io
+import os
 import re
 import textwrap
 from collections.abc import Iterator, Sequence
@@ -322,25 +323,97 @@ def _library_lock(root: Path) -> Iterator[None]:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-def _sync(root: Path, *, workers: int) -> dict[str, object]:
-    if not 1 <= workers <= 8:
-        raise ServerInputError("Sync workers must be between 1 and 8.")
-    events: list[dict[str, object]] = []
+def _sync_roots(root: Path) -> tuple[Path, ...]:
+    """Return existing independent sync roots below a browsable library root."""
+    if (root / ".esbern" / "state.json").is_file():
+        return (root,)
 
+    roots: list[Path] = []
+    for directory, names, _files in os.walk(root, followlinks=False):
+        current = Path(directory)
+        names[:] = [
+            name
+            for name in names
+            if not name.startswith(".") and not (current / name).is_symlink()
+        ]
+        if (current / ".esbern" / "state.json").is_file():
+            roots.append(current)
+            names.clear()
+    return tuple(sorted(roots, key=lambda item: item.as_posix().casefold())) or (root,)
+
+
+def _download_root(root: Path) -> Path:
+    scopes = _sync_roots(root)
+    configured = os.environ.get("ESBERN_INBOX_DIR", "").strip()
+    if configured:
+        destination = Path(configured).expanduser()
+        if not destination.is_absolute():
+            destination = root / destination
+        destination = destination.resolve()
+        if destination != root and root not in destination.parents:
+            raise ServerInputError("ESBERN_INBOX_DIR must be inside the library root.")
+        if not any(scope == destination or scope in destination.parents for scope in scopes):
+            raise ServerInputError(
+                "ESBERN_INBOX_DIR must be inside an existing synchronized folder."
+            )
+        destination.mkdir(parents=True, exist_ok=True)
+        return destination
+
+    if scopes == (root,):
+        return root
+    books = [scope for scope in scopes if scope.name.casefold() == "books"]
+    if len(books) == 1:
+        return books[0]
+    if len(scopes) == 1:
+        return scopes[0]
+    raise ServerInputError(
+        "This library contains multiple synchronized folders. Set "
+        "ESBERN_INBOX_DIR to choose where downloaded books are installed."
+    )
+
+
+def _event_reporter(events: list[dict[str, object]]):
     def report(event: SyncEvent) -> None:
         if len(events) < 1_000:
             events.append(asdict(event))
 
+    return report
+
+
+def _sync(root: Path, *, workers: int) -> dict[str, object]:
+    if not 1 <= workers <= 8:
+        raise ServerInputError("Sync workers must be between 1 and 8.")
     cfg = config.load()
-    with connected(cfg) as remarkable:
-        stats = run_sync(
-            remarkable,
-            root,
-            restart=cfg.restart_xochitl,
-            reporter=report,
-            workers=workers,
+    libraries: list[dict[str, object]] = []
+    totals: dict[str, int] = {}
+    for sync_root in _sync_roots(root):
+        events: list[dict[str, object]] = []
+        with connected(cfg) as remarkable:
+            stats = run_sync(
+                remarkable,
+                sync_root,
+                restart=cfg.restart_xochitl,
+                reporter=_event_reporter(events),
+                workers=workers,
+            )
+        stats_payload = asdict(stats)
+        for name, value in stats_payload.items():
+            totals[name] = totals.get(name, 0) + value
+        libraries.append(
+            {
+                "library": sync_root.relative_to(root).as_posix()
+                if sync_root != root
+                else ".",
+                "stats": stats_payload,
+                "events": events,
+            }
         )
-    return {"ok": True, "stats": asdict(stats), "events": events}
+    return {
+        "ok": True,
+        "stats": totals,
+        "events": libraries[0]["events"] if len(libraries) == 1 else [],
+        "libraries": libraries,
+    }
 
 
 def synchronize(root: Path, *, workers: int = 4) -> dict[str, object]:
@@ -370,10 +443,10 @@ def _query_list(raw: object) -> list[str]:
     return queries
 
 
-def _download_result(result: DownloadedBook) -> dict[str, object]:
+def _download_result(result: DownloadedBook, root: Path) -> dict[str, object]:
     return {
         "query": result.query,
-        "relpath": result.path.name,
+        "relpath": result.path.relative_to(root).as_posix(),
         "format": result.format,
         "source": result.source,
         "metadata": asdict(result.metadata) if result.metadata else None,
@@ -435,6 +508,7 @@ def _download_many(
             continue
         pending.append((index, query))
 
+    destination = _download_root(root)
     downloaded_by_index: dict[int, dict[str, object]] = {}
     failed_by_index: dict[int, dict[str, str]] = {}
 
@@ -442,7 +516,7 @@ def _download_many(
         console = Console(file=io.StringIO(), force_terminal=False, color_system=None)
         result = download_book(
             query,
-            root,
+            destination,
             formats=formats,
             console=console,
             source=source,
@@ -461,7 +535,7 @@ def _download_many(
                 index, query = futures[future]
                 try:
                     completed_index, result = future.result()
-                    downloaded_by_index[completed_index] = _download_result(result)
+                    downloaded_by_index[completed_index] = _download_result(result, root)
                 except Exception as error:  # noqa: BLE001 - isolate each bulk item
                     failed_by_index[index] = {"query": query, "error": str(error)}
 

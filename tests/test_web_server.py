@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from esbern.cli import main
 from esbern.downloader import DownloadedBook
-from esbern.server_library import catalog, cover, install_books
+from esbern.server_library import _sync_roots, catalog, cover, install_books
 from esbern.web_server import create_app
 
 
@@ -182,6 +182,41 @@ def test_download_batch_runs_one_sync_after_all_downloads(
         )
 
     assert len(result["downloaded"]) == 2
+    sync.assert_called_once_with(tmp_path, workers=4)
+
+
+def test_existing_child_states_are_independent_sync_roots(tmp_path) -> None:
+    for name in ("Books", "papers"):
+        state = tmp_path / name / ".esbern" / "state.json"
+        state.parent.mkdir(parents=True)
+        state.write_text("{}")
+
+    assert _sync_roots(tmp_path) == (tmp_path / "Books", tmp_path / "papers")
+
+
+@patch("esbern.server_library._sync")
+@patch("esbern.server_library.find_existing_book", return_value=None)
+@patch("esbern.server_library.download_book")
+def test_multi_scope_downloads_default_to_books(
+    download, _find_existing, sync, tmp_path
+) -> None:
+    for name in ("Books", "papers"):
+        state = tmp_path / name / ".esbern" / "state.json"
+        state.parent.mkdir(parents=True)
+        state.write_text("{}")
+
+    def downloaded(query, destination, **_kwargs):
+        path = destination / f"{query}.epub"
+        path.write_bytes(query.encode())
+        return DownloadedBook(query, path, "epub")
+
+    download.side_effect = downloaded
+    sync.return_value = {"ok": True, "stats": {}, "events": []}
+    with patch("esbern.server_library.google_books_api_key", return_value="key"):
+        result = install_books(tmp_path, {"queries": ["A New Book"]})
+
+    assert download.call_args.args[1] == tmp_path / "Books"
+    assert result["downloaded"][0]["relpath"] == "Books/A New Book.epub"
     sync.assert_called_once_with(tmp_path, workers=4)
 
 

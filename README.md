@@ -102,8 +102,8 @@ Start the UV-managed Python server from the library root. It listens on every
 interface so it is reachable through Tailscale by default:
 
 ```sh
-cd ~/reading/Books
-uv run esbern serve
+cd ~/esbern
+ESBERN_INBOX_DIR=Books uv run esbern serve --path ~/reading
 # http://server:3000       image-only cover grid
 # http://server:3000/docs  generated API reference
 ```
@@ -115,7 +115,11 @@ used when available; otherwise Esbern generates a deterministic title cover.
 
 The JSON API exposes the same downloader and two-way sync engine as the CLI.
 A successful single or bulk download is installed locally first, then the
-entire library is synced with the configured reMarkable exactly once:
+entire library is synced with the configured reMarkable exactly once. When the
+library root contains existing independently synced folders, the sync route
+reconciles each one without creating a duplicate top-level collection. New
+downloads default to a synced folder named `Books`; set `ESBERN_INBOX_DIR` to a
+relative folder name to choose a different inbox:
 
 ```sh
 # Catalog
