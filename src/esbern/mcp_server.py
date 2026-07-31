@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from mcp.server import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
 _API_URL = os.environ.get("ESBERN_INTERNAL_API_URL", "http://127.0.0.1:8037").rstrip(
@@ -128,6 +129,23 @@ def main() -> None:
         streamable_http_path="/",
         stateless_http=True,
         json_response=True,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[
+                "127.0.0.1:*",
+                "localhost:*",
+                "[::1]:*",
+                "esbern.rishi.cx",
+                "esbern.rishi.cx:443",
+            ],
+            allowed_origins=[
+                "http://127.0.0.1:*",
+                "http://localhost:*",
+                "http://[::1]:*",
+                "https://claude.ai",
+                "https://www.claude.ai",
+            ],
+        ),
     )
 
 
