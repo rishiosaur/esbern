@@ -13,6 +13,8 @@ Environment=ESBERN_CONFIG_DIR=/etc/esbern
 Environment=ESBERN_INBOX_DIR=Books
 Environment=PYTHONUNBUFFERED=1
 LoadCredential=api-token:/etc/esbern/api-token
+LoadCredential=google-books-api-key:/etc/esbern/google-books-api-key
+LoadCredential=anthropic-api-key:/etc/esbern/anthropic-api-key
 ExecStart=/opt/esbern/deploy/run-server.sh
 Restart=always
 RestartSec=5
