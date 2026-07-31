@@ -33,7 +33,9 @@ or manual import.
    ssh railway 'cat /etc/esbern/claude-connector-url'
    ```
 
-3. Enable the connector in a conversation. Its tools and safety instructions
+3. Leave the advanced OAuth Client ID and Client Secret fields empty. Esbern
+   is an authless MCP connector protected by its private capability URL.
+4. Enable the connector in a conversation. Its tools and safety instructions
    are supplied by the server. The connector can then be used from Claude on
    iOS or Android.
 
